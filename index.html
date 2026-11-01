@@ -1,0 +1,162 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <title>ListSnap</title>
+  <meta name="description" content="Turn a photo of a list into an Excel file, or add it to one you already have.">
+  <meta name="theme-color" content="#1f7a4d">
+  <link rel="manifest" href="manifest.json">
+  <link rel="icon" href="icons/icon-192.png">
+  <link rel="apple-touch-icon" href="icons/icon-192.png">
+  <link rel="stylesheet" href="style.css">
+</head>
+<body>
+  <header class="topbar">
+    <div class="brand"><img src="icons/icon-192.png" alt=""><span>ListSnap</span></div>
+    <div id="account" class="account">
+      <span id="userLabel" class="muted">Not signed in</span>
+      <button id="signInBtn" class="btn small">Sign in with Google</button>
+      <button id="signOutBtn" class="btn small ghost" hidden>Sign out</button>
+    </div>
+  </header>
+
+  <main>
+    <!-- Step 1: image -->
+    <section class="card" id="scanCard">
+      <h2>1. Picture of your list</h2>
+      <div id="dropZone" class="drop">
+        <img id="preview" alt="" hidden>
+        <div id="dropHint">
+          <p><strong>Take a photo</strong> or <strong>choose an image</strong>.<br><span class="muted">On a computer you can also drag an image here or paste one with Ctrl+V.</span></p>
+        </div>
+      </div>
+      <div class="row wrap">
+        <label class="btn primary">📷 Camera / Image
+          <input id="imageInput" type="file" accept="image/*" capture="environment" hidden>
+        </label>
+        <label class="btn">🖼️ Gallery / File
+          <input id="imageInputGallery" type="file" accept="image/*" hidden>
+        </label>
+        <label class="inline">Language
+          <select id="ocrLang">
+            <option value="eng">English</option>
+            <option value="amh">Amharic (አማርኛ)</option>
+            <option value="amh+eng">Amharic + English</option>
+            <option value="heb">Hebrew</option>
+            <option value="ara">Arabic</option>
+            <option value="spa">Spanish</option>
+            <option value="fra">French</option>
+            <option value="deu">German</option>
+            <option value="por">Portuguese</option>
+            <option value="ita">Italian</option>
+            <option value="rus">Russian</option>
+            <option value="tgl">Filipino</option>
+          </select>
+        </label>
+        <button id="readBtn" class="btn primary" disabled>Read list</button>
+      </div>
+      <label class="inline small-gap"><input id="imageColumns" type="checkbox" checked> Use the columns from the picture</label>
+      <div id="progressWrap" class="progress" hidden><div id="progressBar"></div><span id="progressText"></span></div>
+      <details id="rawWrap" hidden><summary>Text the scanner read</summary><pre id="rawText"></pre></details>
+    </section>
+
+    <!-- Step 2: table -->
+    <section class="card">
+      <div class="row space">
+        <h2>2. Check &amp; edit</h2>
+        <div class="row wrap">
+          <select id="templateSelect" title="Column setup"></select>
+          <button id="saveTemplateBtn" class="btn small ghost" title="Save these columns as a list template">Save as template</button>
+          <button id="deleteTemplateBtn" class="btn small ghost" title="Delete the selected template">Delete template</button>
+        </div>
+      </div>
+      <div class="table-wrap">
+        <table id="grid"><thead></thead><tbody></tbody></table>
+      </div>
+      <div class="row wrap">
+        <button id="addRowBtn" class="btn">+ Row</button>
+        <button id="addColBtn" class="btn">+ Column</button>
+        <button id="clearBtn" class="btn ghost">Clear rows</button>
+        <span id="rowCount" class="muted"></span>
+      </div>
+      <p class="muted small">Tap a column name to rename it, change its type, or delete it. Check the scanner's work before saving, especially with handwriting.</p>
+    </section>
+
+    <!-- Step 3: save -->
+    <section class="card">
+      <h2>3. Save to Excel</h2>
+      <div class="tabs" role="tablist">
+        <button class="tab active" data-mode="new" role="tab">New Excel file</button>
+        <button class="tab" data-mode="existing" role="tab">Add to existing file</button>
+      </div>
+
+      <div id="modeNew" class="mode">
+        <label class="field">File name <input id="newFileName" type="text" placeholder="e.g. Orders October"></label>
+        <label class="field">Sheet (tab) name <input id="newSheetName" type="text" value="List"></label>
+      </div>
+
+      <div id="modeExisting" class="mode" hidden>
+        <div class="row wrap">
+          <select id="fileSelect" class="grow"><option value="">Choose a file…</option></select>
+          <button id="refreshFilesBtn" class="btn small ghost" title="Refresh list">↻</button>
+          <label class="btn small">Open from device
+            <input id="xlsxInput" type="file" accept=".xlsx,.xls,.csv,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet" hidden>
+          </label>
+        </div>
+        <div class="row wrap">
+          <select id="sheetSelect" class="grow" disabled></select>
+          <input id="newTabName" type="text" placeholder="New tab name" hidden>
+        </div>
+        <p id="existingInfo" class="muted small"></p>
+      </div>
+
+      <div class="row wrap">
+        <button id="saveBtn" class="btn primary">Save</button>
+        <label class="inline"><input id="alsoDownload" type="checkbox"> Also download a copy</label>
+      </div>
+      <p id="saveStatus" class="status"></p>
+    </section>
+
+    <section class="card" id="filesCard" hidden>
+      <h2>Your ListSnap files <span class="muted small">(Google Drive)</span></h2>
+      <ul id="fileList" class="file-list"></ul>
+    </section>
+  </main>
+
+  <dialog id="colDialog">
+    <form method="dialog">
+      <h3 id="colDialogTitle">Column</h3>
+      <label class="field">Name <input id="colName" type="text" required></label>
+      <label class="field">Type
+        <select id="colType">
+          <option value="text">Text</option>
+          <option value="number">Number</option>
+          <option value="time">Morning / Afternoon</option>
+          <option value="check">Yes / No checkbox</option>
+          <option value="date">Date</option>
+        </select>
+      </label>
+      <div class="row space">
+        <button id="colDelete" value="delete" class="btn ghost danger" formnovalidate>Delete column</button>
+        <div class="row">
+          <button value="cancel" class="btn ghost" formnovalidate>Cancel</button>
+          <button value="ok" class="btn primary">OK</button>
+        </div>
+      </div>
+    </form>
+  </dialog>
+
+  <div id="toast" class="toast" hidden></div>
+
+  <script src="config.js"></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/tesseract.js@5.1.1/dist/tesseract.min.js"></script>
+  <script src="https://accounts.google.com/gsi/client" async defer></script>
+  <script src="parse.js"></script>
+  <script src="ocr.js"></script>
+  <script src="excel.js"></script>
+  <script src="drive.js"></script>
+  <script src="app.js"></script>
+</body>
+</html>

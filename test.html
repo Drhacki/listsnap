@@ -1,0 +1,207 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>ListSnap Tests</title>
+  <style>
+    :root { --bg: #fff; --text: #111; --ok: #1f7a4d; --bad: #b3261e; }
+    @media (prefers-color-scheme: dark) { :root:not([data-theme="light"]) { --bg: #121614; --text: #e6ece9; --ok: #3fb07a; --bad: #f2b8b5; } }
+    :root[data-theme="dark"] { --bg: #121614; --text: #e6ece9; --ok: #3fb07a; --bad: #f2b8b5; }
+    body { background: var(--bg); color: var(--text); font: 14px/1.4 system-ui, sans-serif; padding: 16px; }
+    .ok { color: var(--ok); } .bad { color: var(--bad); font-weight: 700; }
+    pre { white-space: pre-wrap; }
+  </style>
+</head>
+<body>
+  <h1>ListSnap self-test</h1>
+  <p>Checks the list parser, the Excel append logic, and real OCR on the images in <code>samples/</code>.</p>
+  <div id="log"></div>
+  <pre id="out"></pre>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/tesseract.js@5.1.1/dist/tesseract.min.js"></script>
+  <script src="parse.js"></script>
+  <script src="ocr.js"></script>
+  <script src="excel.js"></script>
+  <script>
+  (async () => {
+    const results = [];
+    const log = (ok, name, detail) => {
+      results.push({ ok, name, detail });
+      const p = document.createElement("div");
+      p.className = ok ? "ok" : "bad";
+      p.textContent = (ok ? "PASS " : "FAIL ") + name + (detail ? " | " + detail : "");
+      document.getElementById("log").appendChild(p);
+    };
+    const eq = (a, b) => JSON.stringify(a) === JSON.stringify(b);
+
+    // --- parser ---
+    const cases = [
+      ["Eggs 12", { item: "Eggs", qty: 12, price: "", time: "", made: false }],
+      ["Bread loaves   12   $3.50   made", { item: "Bread loaves", qty: 12, price: 3.5, time: "", made: true }],
+      ["Muffins x 18 @ 2.00 done", { item: "Muffins", qty: 18, price: 2, time: "", made: true }],
+      ["3. Flour 2 kg 4,50 morning", { item: "Flour (kg)", qty: 2, price: 4.5, time: "Morning", made: false }],
+      ["- Milk - 4", { item: "Milk", qty: 4, price: "", time: "", made: false }],
+      ["Sugar 2 15₪", { item: "Sugar", qty: 2, price: 15, time: "", made: false }],
+      ["Oil 1 nis 30", { item: "Oil", qty: 1, price: 30, time: "", made: false }],
+      ["Rice 5 20",{ item: "Rice", qty: 5, price: 20, time: "", made: false }],
+      ["Cake 1 PM ✓", { item: "Cake", qty: 1, price: "", time: "Afternoon", made: true }],
+      ["ዳቦ 12 30 ብር ተሰርቷል", { item: "ዳቦ", qty: 12, price: 30, time: "", made: true }],
+      ["ሻይ ቅጠል 2 ኪሎ 150 ብር በጠዋት", { item: "ሻይ ቅጠል (ኪሎ)", qty: 2, price: 150, time: "Morning", made: false }],
+      ["ቡና ፲፪ ብር ፪፻፶ ከሰዓት በኋላ", { item: "ቡና", qty: 12, price: 250, time: "Afternoon", made: false }],
+      ["ዳቦ 12 3ዐ ብር ዝግጂ", { item: "ዳቦ", qty: 12, price: 30, time: "", made: true }],
+      ["ዕቃ ብዛት ዋጋ", null],
+      ["Item  Qty  Price", null],
+      ["12345", null],
+    ];
+    const st = { section: "" };
+    for (const [line, want] of cases) {
+      const got = ListParser.parseLine(line, st);
+      log(eq(got, want), `parse "${line}"`, eq(got, want) ? "" : `got ${JSON.stringify(got)}`);
+    }
+    const sec = ListParser.parseListText("Morning:\nA 1\nB 2\nAFTERNOON\nC 3");
+    log(eq(sec.map((r) => r.time), ["Morning", "Morning", "Afternoon"]), "section headers set the time");
+    const secAm = ListParser.parseListText("ጠዋት\nዳቦ 1\nከሰዓት በኋላ\nቡና 2");
+    log(eq(secAm.map((r) => r.time), ["Morning", "Afternoon"]), "Amharic section headers set the time", JSON.stringify(secAm));
+
+    // --- columns decided by the picture (plain text: 2+ spaces = column gap) ---
+    const line = (cells, w = 10) => cells.map((c) => c.padEnd(w)).join("").trimEnd();
+    const colsOf = (r) => r.columns.map((c) => `${c.name}:${c.type}`);
+    let a = ListParser.analyze([
+      line(["Product", "Unit", "Qty", "Price", "Supplier"]),
+      line(["Flour", "kg", "25", "$40.00", "Abebe"]),
+      line(["Eggs", "tray", "6", "$4.20", "Farm Co"]),
+    ].join("\n"));
+    log(eq(colsOf(a), ["Product:text", "Unit:text", "Qty:number", "Price:number", "Supplier:text"]), "header row becomes the columns", JSON.stringify(colsOf(a)));
+    log(eq(a.rows, [["Flour", "kg", 25, 40, "Abebe"], ["Eggs", "tray", 6, 4.2, "Farm Co"]]), "values land under the right header", JSON.stringify(a.rows));
+
+    a = ListParser.analyze([line(["Item", "Qty", "Done"]), "MORNING", line(["Bread", "12", "✓"]), "AFTERNOON", line(["Cake", "2", "-"])].join("\n"));
+    log(eq(colsOf(a), ["Item:text", "Qty:number", "Done:check", "Time:time"]), "section titles add a Time column", JSON.stringify(colsOf(a)));
+    log(eq(a.rows, [["Bread", 12, true, "Morning"], ["Cake", 2, false, "Afternoon"]]), "yes/no and time values", JSON.stringify(a.rows));
+
+    a = ListParser.analyze("Eggs 12\nMilk 4");
+    log(eq(colsOf(a), ["Item:text", "Qty:number"]), "no header: only the columns the list has", JSON.stringify(colsOf(a)));
+
+    a = ListParser.analyze([line(["ዕቃ", "ብዛት", "ዋጋ", "ደንበኛ"]), line(["ዳቦ", "፲፪", "30 ብር", "ሰላም"])].join("\n"));
+    log(eq(colsOf(a), ["ዕቃ:text", "ብዛት:number", "ዋጋ:number", "ደንበኛ:text"]) && eq(a.rows, [["ዳቦ", 12, 30, "ሰላም"]]), "Amharic header row", JSON.stringify(a));
+
+    // --- tables with grid lines (word positions + line positions, no OCR) ---
+    const wd = (text, x0, y0, x1, y1) => ({ text, x0, y0, x1, y1 });
+    a = ListParser.analyze("", [
+      { words: [wd("Item", 10, 5, 50, 15), wd("Qty", 110, 5, 140, 15)] },
+      { words: [wd("Fresh", 10, 25, 50, 35)] },
+      { words: [wd("bread", 10, 40, 50, 50), wd("12", 110, 40, 125, 50)] },
+      { words: [wd("Milk", 10, 65, 50, 75), wd("4", 110, 65, 120, 75)] },
+    ], { rows: [20, 58, 85], cols: [100] });
+    log(eq(colsOf(a), ["Item:text", "Qty:number"]) && eq(a.rows, [["Fresh bread", 12], ["Milk", 4]]), "grid: text wrapped inside a cell stays one row", JSON.stringify(a));
+
+    a = ListParser.analyze("", [
+      { words: [wd("A", 60, 0, 66, 8), wd("B", 160, 0, 166, 8), wd("C", 260, 0, 266, 8)] },
+      { words: [wd("1", 5, 15, 10, 25), wd("Task", 60, 15, 90, 25), wd("Owner", 160, 15, 200, 25)] },
+      { words: [wd("2", 5, 35, 10, 45), wd("Call", 60, 35, 85, 45), wd("Sam", 160, 35, 185, 45)] },
+    ], { rows: [12, 30, 50], cols: [40, 140, 240] });
+    log(eq(a.columns.map((c) => c.name), ["Task", "Owner"]) && eq(a.rows, [["Call", "Sam"]]), "grid: spreadsheet letters, row numbers and empty columns are dropped", JSON.stringify(a));
+
+    a = ListParser.analyze("", [
+      { words: [wd("No.", 5, 5, 20, 15), wd("Item", 60, 5, 90, 15), wd("Status", 160, 5, 200, 15)] },
+      { words: [wd("1", 5, 25, 10, 35), wd("Bread", 60, 25, 95, 35), wd("Done", 160, 25, 190, 35)] },
+      { words: [wd("2", 5, 45, 10, 55), wd("Milk", 60, 45, 90, 55), wd("Not", 160, 45, 180, 55), wd("started", 184, 45, 220, 55)] },
+    ], { rows: [20, 40, 60], cols: [40, 140] });
+    log(eq(a.columns.map((c) => `${c.name}:${c.type}:${c.role}`), ["No:number:qty", "Item:text:item", "Status:text:null"]) && eq(a.rows, [[1, "Bread", "Done"], [2, "Milk", "Not started"]]),
+      "grid: a printed No. column is kept, and a Status column of words stays text", JSON.stringify(a));
+
+    // --- excel ---
+    const cols = [
+      { id: "a", name: "Item", type: "text", role: "item" },
+      { id: "b", name: "Qty", type: "number", role: "qty" },
+      { id: "c", name: "Made", type: "check", role: "made" },
+    ];
+    const wb = ListExcel.buildWorkbook("List", cols, [{ a: "Eggs", b: 12, c: true }]);
+    const buf = ListExcel.toArrayBuffer(wb);
+    const wb2 = ListExcel.readWorkbook(buf);
+    const cols2 = [...cols, { id: "d", name: "Price", type: "number" }].map((c) => c.id === "a" ? { ...c, name: "item" } : c);
+    const res = ListExcel.appendToWorkbook(wb2, "List", cols2, [{ a: "Milk", b: 2, c: false, d: 3.2 }]);
+    const aoa = XLSX.utils.sheet_to_json(ListExcel.readWorkbook(ListExcel.toArrayBuffer(wb2)).Sheets.List, { header: 1 });
+    const wantAoa = [["Item", "Qty", "Made", "Price"], ["Eggs", 12, "Yes"], ["Milk", 2, "No", 3.2]];
+    log(eq(aoa, wantAoa), "append matches headers (ignoring case) and adds a new column", JSON.stringify(aoa));
+    log(eq(res.newColumns, ["Price"]), "reports the new columns");
+    ListExcel.appendToWorkbook(wb2, "Second list", cols, [{ a: "Tea", b: 1, c: true }]);
+    log(eq(wb2.SheetNames, ["List", "Second list"]), "a new tab is created");
+
+    // --- OCR on samples ---
+    for (const name of ["printed-list.png", "phone-photo-list.jpg"]) {
+      try {
+        const blob = await (await fetch("samples/" + name)).blob();
+        const file = new File([blob], name, { type: blob.type });
+        const t0 = performance.now();
+        const { text } = await ListOCR.readImage(file, "eng");
+        const rows = ListParser.parseListText(text);
+        const secs = ((performance.now() - t0) / 1000).toFixed(1);
+        const items = rows.map((r) => r.item.toLowerCase());
+        const expected = ["bread loaves", "croissants", "muffins", "cookies", "banana cake", "milk (l)"];
+        const found = expected.filter((e) => items.includes(e));
+        log(found.length >= 5, `OCR ${name}: ${found.length}/6 items (${secs}s)`, JSON.stringify(rows));
+        results.push({ ocrText: text });
+      } catch (e) {
+        log(false, `OCR ${name}`, String(e));
+      }
+    }
+
+    for (const name of ["amharic-list.png", "amharic-phone-photo.jpg"]) {
+      try {
+        const blob = await (await fetch("samples/" + name)).blob();
+        const t0 = performance.now();
+        const { text } = await ListOCR.readImage(new File([blob], name, { type: blob.type }), "amh");
+        const rows = ListParser.parseListText(text);
+        const secs = ((performance.now() - t0) / 1000).toFixed(1);
+        const want = [["ዳቦ", 12, 30], ["እንቁላል", 24, 8], ["ሻይ ቅጠል (ኪሎ)", 2, 150], ["ቡና (ኪሎ)", 5, 600], ["ስኳር (ኪሎ)", 3, 95]];
+        const exact = want.filter(([i, q, p]) => rows.some((r) => r.item === i && r.qty === q && r.price === p));
+        log(exact.length >= 4, `Amharic OCR ${name}: ${exact.length}/5 rows exactly right (${secs}s)`, JSON.stringify(rows));
+        results.push({ ocrText: text });
+      } catch (e) {
+        log(false, `Amharic OCR ${name}`, String(e));
+      }
+    }
+
+    // --- picture tables: columns from the header row, using real word positions ---
+    for (const [name, lang, wantCols, wantFirst] of [
+      ["table-with-header.jpg", "eng", ["Product", "Unit", "Qty", "Price", "Supplier"], ["Flour", "kg", 25, 40, "Abebe"]],
+      ["amharic-table.png", "amh", ["ዕቃ", "ብዛት", "ዋጋ", "ደንበኛ"], ["ዳቦ", 12, 30, "ሰላም"]],
+    ]) {
+      try {
+        const blob = await (await fetch("samples/" + name)).blob();
+        const { text, lines } = await ListOCR.readImage(new File([blob], name, { type: blob.type }), lang);
+        const r = ListParser.analyze(text, lines);
+        const names = r.columns.map((c) => c.name);
+        log(eq(names, wantCols) && eq(r.rows[0], wantFirst), `picture table ${name}: columns + first row`, JSON.stringify({ cols: r.columns, rows: r.rows, positions: lines.length }));
+      } catch (e) {
+        log(false, `picture table ${name}`, String(e));
+      }
+    }
+
+    // --- spreadsheet screenshot: small text, wrapped cells, A B C letters and row numbers ---
+    try {
+      const blob = await (await fetch("samples/spreadsheet-wrapped.png")).blob();
+      const t0 = performance.now();
+      const { text, lines, grid } = await ListOCR.readImage(new File([blob], "spreadsheet-wrapped.png", { type: blob.type }), "eng");
+      const r = ListParser.analyze(text, lines, grid);
+      const secs = ((performance.now() - t0) / 1000).toFixed(1);
+      const names = r.columns.map((c) => c.name.toLowerCase());
+      const ok = eq(names, ["(action item)", "owner", "start date", "finish date", "status"])
+        && r.rows.length === 6
+        && /^Phase 1/.test(r.rows[0][0])
+        && eq(r.rows[1].slice(1), ["Self", "2025-11-09", "2025-11-10", "Not Started"])
+        && eq(r.rows[5].slice(1), ["Self", "2025-11-21", "2025-11-22", "In Progress"]);
+      log(ok, `spreadsheet screenshot: 5 columns, 6 rows (${secs}s)`, JSON.stringify({ cols: r.columns, rows: r.rows }));
+    } catch (e) {
+      log(false, "spreadsheet screenshot", String(e));
+    }
+
+    const summary = { passed: results.filter((r) => r.ok === true).length, failed: results.filter((r) => r.ok === false).length, results };
+    document.getElementById("out").textContent = JSON.stringify(summary, null, 2);
+    document.title = summary.failed ? "ListSnap Tests: FAIL" : "ListSnap Tests: PASS";
+    try { await fetch("/__result", { method: "POST", body: JSON.stringify(summary) }); } catch (_) {}
+  })();
+  </script>
+</body>
+</html>
