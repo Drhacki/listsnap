@@ -38,7 +38,7 @@
         <label class="btn">🖼️ Gallery / File
           <input id="imageInputGallery" type="file" accept="image/*" hidden>
         </label>
-        <label class="inline">Language
+        <label class="inline" id="langWrap">Language
           <select id="ocrLang">
             <option value="eng">English</option>
             <option value="amh">Amharic (አማርኛ)</option>
@@ -57,6 +57,17 @@
         <button id="readBtn" class="btn primary" disabled>Read list</button>
       </div>
       <label class="inline small-gap"><input id="imageColumns" type="checkbox" checked> Use the columns from the picture</label>
+      <div class="row wrap">
+        <label class="inline">Reader
+          <select id="reader">
+            <option value="free">Free, on this device</option>
+            <option value="claude">Claude (Anthropic)</option>
+            <option value="gemini">Gemini (Google)</option>
+          </select>
+        </label>
+        <button id="aiKeyBtn" type="button" class="btn small ghost" hidden>API key</button>
+      </div>
+      <p id="readerNote" class="muted small note"></p>
       <div id="progressWrap" class="progress" hidden><div id="progressBar"></div><span id="progressText"></span></div>
       <details id="rawWrap" hidden><summary>Text the scanner read</summary><pre id="rawText"></pre></details>
     </section>
@@ -71,6 +82,22 @@
           <button id="deleteTemplateBtn" class="btn small ghost" title="Delete the selected template">Delete template</button>
         </div>
       </div>
+      <div class="check-tools">
+        <details id="photoPane" class="photo-pane" hidden>
+          <summary>Show the photo while checking</summary>
+          <div class="photo-wrap">
+            <div id="photoBox" class="photo-box"><img id="checkPhoto" alt="The photo you scanned"></div>
+            <div class="zoom">
+              <button id="zoomOut" type="button" class="btn small" aria-label="Zoom out">−</button>
+              <button id="zoomIn" type="button" class="btn small" aria-label="Zoom in">+</button>
+            </div>
+          </div>
+        </details>
+        <div id="checkBar" class="check-bar" hidden>
+          <span id="checkText"></span>
+          <button id="checkNext" type="button" class="btn small">Next ›</button>
+        </div>
+      </div>
       <div class="table-wrap">
         <table id="grid"><thead></thead><tbody></tbody></table>
       </div>
@@ -78,8 +105,11 @@
         <button id="addRowBtn" class="btn">+ Row</button>
         <button id="addColBtn" class="btn">+ Column</button>
         <button id="clearBtn" class="btn ghost">Clear rows</button>
+        <button id="proofBtn" class="btn" hidden>🔍 Proofread with AI</button>
         <span id="rowCount" class="muted"></span>
       </div>
+      <p id="proofStatus" class="muted small note"></p>
+      <div id="proofList" class="proof-list" hidden></div>
       <p class="muted small">Tap a column name to rename it, change its type, or delete it. Check the scanner's work before saving, especially with handwriting.</p>
     </section>
 
@@ -135,13 +165,45 @@
           <option value="time">Morning / Afternoon</option>
           <option value="check">Yes / No checkbox</option>
           <option value="date">Date</option>
+          <option value="calc">Calculated (equation)</option>
         </select>
       </label>
+      <div id="eqWrap" hidden>
+        <label class="field">Equation <textarea id="colEquation" rows="2" autocomplete="off" spellcheck="false" placeholder="[Qty] × [Price]"></textarea></label>
+        <div class="eq-keys">
+          <button type="button" class="btn small" data-eq=" + ">+</button>
+          <button type="button" class="btn small" data-eq=" − ">−</button>
+          <button type="button" class="btn small" data-eq=" × ">×</button>
+          <button type="button" class="btn small" data-eq=" ÷ ">÷</button>
+          <button type="button" class="btn small" data-eq="(">(</button>
+          <button type="button" class="btn small" data-eq=")">)</button>
+        </div>
+        <p class="muted small note">Tap a column to add it to the equation. You can type numbers too, like <code>× 15%</code>.</p>
+        <div id="eqColumns" class="eq-columns"></div>
+        <p id="eqPreview" class="small eq-preview"></p>
+      </div>
+      <p id="colError" class="status err" hidden></p>
       <div class="row space">
         <button id="colDelete" value="delete" class="btn ghost danger" formnovalidate>Delete column</button>
         <div class="row">
           <button value="cancel" class="btn ghost" formnovalidate>Cancel</button>
-          <button value="ok" class="btn primary">OK</button>
+          <button id="colOk" value="ok" class="btn primary">OK</button>
+        </div>
+      </div>
+    </form>
+  </dialog>
+
+  <dialog id="keyDialog">
+    <form method="dialog">
+      <h3 id="keyTitle">API key</h3>
+      <p class="small"><span id="keyHelp"></span> <a id="keyLink" target="_blank" rel="noopener"></a><span id="keyHelpEnd"></span></p>
+      <p id="keyPrivacy" class="muted small"></p>
+      <label class="field">API key <input id="keyInput" type="password" autocomplete="off" spellcheck="false"></label>
+      <div class="row space">
+        <button id="keyForget" value="forget" class="btn ghost danger" formnovalidate>Remove key</button>
+        <div class="row">
+          <button value="cancel" class="btn ghost" formnovalidate>Cancel</button>
+          <button value="ok" class="btn primary">Save</button>
         </div>
       </div>
     </form>
@@ -150,11 +212,10 @@
   <div id="toast" class="toast" hidden></div>
 
   <script src="config.js"></script>
-  <script src="https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js"></script>
-  <script src="https://cdn.jsdelivr.net/npm/tesseract.js@5.1.1/dist/tesseract.min.js"></script>
-  <script src="https://accounts.google.com/gsi/client" async defer></script>
+  <script src="load.js"></script>
   <script src="parse.js"></script>
   <script src="ocr.js"></script>
+  <script src="ai.js"></script>
   <script src="excel.js"></script>
   <script src="drive.js"></script>
   <script src="app.js"></script>

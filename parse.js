@@ -373,7 +373,6 @@
       const name = cleanHeader(n) || `Column ${k + 1}`;
       return { name, role: headerRole(name) };
     });
-    if (!columns.some((c) => c.role === "item") && !columns[0].role) columns[0].role = "item";
 
     const out = [], sections = [];
     let section = "";
@@ -384,9 +383,33 @@
       if (hasHeader && r.filter(isHeaderWord).length >= 2 && r.every((v, k) => !v || v === names[k])) continue; // header repeated
       out.push(r); sections.push(section);
     }
+    markItemColumn(columns, out);
     applySections(columns, out, sections);
     finishColumns(columns, out);
     return { columns, rows: out, fromHeader: hasHeader };
+  }
+
+  // Without an Item-like header, the item column is the first one that holds words rather than numbers
+  // (so a form's "No." column isn't taken for it).
+  function markItemColumn(columns, rows) {
+    if (columns.some((c) => c.role === "item")) return;
+    const k = columns.findIndex((c, i) => {
+      const vals = rows.map((r) => r[i]).filter(Boolean);
+      return !c.role && vals.length && vals.filter((v) => /\p{L}/u.test(v)).length >= vals.length * 0.6;
+    });
+    if (k >= 0) columns[k].role = "item";
+  }
+
+  // A table whose cells are already known (read by Claude or Gemini): name the columns and pick their types.
+  function fromTable(names, rows) {
+    const columns = names.map((n, k) => {
+      const name = cleanHeader(normalize(n)) || `Column ${k + 1}`;
+      return { name, role: headerRole(name) };
+    });
+    const out = rows.map((r) => columns.map((_, k) => cleanItem(normalize(r[k] ?? ""))));
+    markItemColumn(columns, out);
+    finishColumns(columns, out);
+    return { columns, rows: out, fromHeader: true };
   }
 
   function fromList(text) {
@@ -417,5 +440,252 @@
     return fromList(text);
   }
 
-  global.ListParser = { parseListText, parseLine, toNumber, analyze };
+  // ---------- Equations: a column worked out from other columns ----------
+  // "[Qty] × [Price]", "([ጠዋት የተሰራ: ድምር] − [ጠዋት የተሰራ: የተበላሸ]) * [Price]", "[Total] * 15%".
+  // Column names go in [ ]; a name without [ ] also works if it has no + - * / or brackets in it.
+  // This reads the equation itself rather than using eval(), so it can only ever do arithmetic.
+  const EQ_OPS = { "+": "+", "-": "-", "−": "-", "–": "-", "—": "-", "*": "*", "×": "*", "/": "/", "÷": "/", "(": "(", ")": ")", "%": "%" };
+  const EQ_SHOW = { "-": "−", "*": "×", "/": "÷" };
+  const sameColumnName = (a, b) => String(a).trim().toLowerCase() === String(b).trim().toLowerCase();
+
+  function equationTokens(source) {
+    const s = String(source).trim().replace(/^=/, "");
+    const tokens = [];
+    for (let i = 0; i < s.length;) {
+      const ch = s[i];
+      if (/\s/.test(ch)) { i++; continue; }
+      if (ch === "[") {
+        const end = s.indexOf("]", i);
+        if (end < 0) throw new Error("A column name is missing its closing ].");
+        const name = s.slice(i + 1, end).trim();
+        if (!name) throw new Error("There's an empty [ ] in the equation.");
+        tokens.push({ ref: name });
+        i = end + 1;
+      } else if (EQ_OPS[ch]) {
+        tokens.push({ op: EQ_OPS[ch] });
+        i++;
+      } else if (ch === "]") {
+        throw new Error("There's a ] without a [ before it.");
+      } else {
+        const word = s.slice(i).match(/^[^+\-−–—*×/÷()%[\]]+/)[0];
+        // A lone x means ×, so "Price x 2" is three parts, not one long name.
+        word.trim().split(/(?:^|\s+)x(?:\s+|$)/i).forEach((part, k) => {
+          if (k > 0) tokens.push({ op: "*" });
+          if (!part) return;
+          if (/^\d*\.?\d+$/.test(part)) tokens.push({ num: Number(part), text: part });
+          else tokens.push({ ref: part });
+        });
+        i += word.length;
+      }
+    }
+    return tokens;
+  }
+
+  // Returns { ok: true, tree, refs, text, hasDivision } or { ok: false, error }. `text` is the tidy form, like "[Qty] × [Price]".
+  function parseEquation(source) {
+    try {
+      const tokens = equationTokens(source);
+      if (!tokens.length) throw new Error("The equation is empty.");
+      let at = 0;
+      const refs = [];
+      let hasDivision = false;
+      const peek = () => tokens[at] && tokens[at].op;
+      const primary = () => {
+        const t = tokens[at];
+        if (!t) throw new Error("The equation stops too early.");
+        at++;
+        if (t.num !== undefined) return { num: t.num };
+        if (t.ref !== undefined) {
+          if (!refs.some((r) => sameColumnName(r, t.ref))) refs.push(t.ref);
+          return { ref: t.ref };
+        }
+        if (t.op === "(") {
+          const inside = sum();
+          if (peek() !== ")") throw new Error("A ( is missing its closing ).");
+          at++;
+          return inside;
+        }
+        throw new Error(t.op === ")" ? "There's a ) without a ( before it, or something missing before it." : "Two signs are next to each other, or something is missing.");
+      };
+      const percent = () => {
+        let node = primary();
+        while (peek() === "%") { at++; node = { pct: node }; }
+        return node;
+      };
+      const unary = () => {
+        if (peek() === "-") { at++; return { neg: unary() }; }
+        if (peek() === "+") { at++; return unary(); }
+        return percent();
+      };
+      const product = () => {
+        let node = unary();
+        while (peek() === "*" || peek() === "/") {
+          const op = tokens[at++].op;
+          if (op === "/") hasDivision = true;
+          node = { op, a: node, b: unary() };
+        }
+        return node;
+      };
+      const sum = () => {
+        let node = product();
+        while (peek() === "+" || peek() === "-") {
+          const op = tokens[at++].op;
+          node = { op, a: node, b: product() };
+        }
+        return node;
+      };
+      const tree = sum();
+      if (at < tokens.length) throw new Error("Something is missing between two parts, like a + or ×.");
+      const text = tokens
+        .map((t) => (t.ref !== undefined ? `[${t.ref}]` : t.num !== undefined ? t.text : EQ_SHOW[t.op] || t.op))
+        .join(" ")
+        .replace(/\( /g, "(").replace(/ \)/g, ")").replace(/ %/g, "%");
+      return { ok: true, tree, refs, text, hasDivision };
+    } catch (e) {
+      return { ok: false, error: e.message };
+    }
+  }
+
+  const DIVIDES_BY_ZERO = "It divides by zero.";
+
+  // valueOf(columnName) gives a number. Returns { value } or { error }.
+  function evalEquation(tree, valueOf) {
+    const run = (n) => {
+      if (n.num !== undefined) return n.num;
+      if (n.ref !== undefined) return valueOf(n.ref);
+      if (n.neg) return -run(n.neg);
+      if (n.pct) return run(n.pct) / 100;
+      const a = run(n.a), b = run(n.b);
+      if (n.op === "+") return a + b;
+      if (n.op === "-") return a - b;
+      if (n.op === "*") return a * b;
+      if (b === 0) throw new Error(DIVIDES_BY_ZERO);
+      return a / b;
+    };
+    try { return { value: run(tree) }; } catch (e) { return { error: e.message }; }
+  }
+
+  // The value of a calculated column in one row (row: values by column id). A blank cell counts as 0, as in Excel.
+  function equationValue(col, columns, row, seen = []) {
+    if (seen.includes(col)) return { error: "The equation uses its own result." };
+    const eq = parseEquation(col.equation || "");
+    if (!eq.ok) return { error: eq.error };
+    return evalEquation(eq.tree, (name) => {
+      const other = columns.find((c) => sameColumnName(c.name, name));
+      if (!other) throw new Error(`There's no column called “${name}”.`);
+      if (other.type === "calc") {
+        const result = equationValue(other, columns, row, [...seen, col]);
+        if (result.error) throw new Error(result.error);
+        return result.value;
+      }
+      const v = row[other.id];
+      if (isBlank(v)) return 0;
+      const n = asNumber(v);
+      if (n === null) throw new Error(`“${v}” in ${other.name} isn't a number.`);
+      return n;
+    });
+  }
+
+  // Checks an equation for the column `self` (null for a new one). Returns { ok, text } with the columns' real
+  // names filled in, or { ok: false, error }.
+  function validateEquation(source, columns, self) {
+    const eq = parseEquation(source);
+    if (!eq.ok) return eq;
+    let text = eq.text;
+    for (const ref of eq.refs) {
+      const col = columns.find((c) => sameColumnName(c.name, ref));
+      if (!col) return { ok: false, error: `There's no column called “${ref}”. Tap a column below to add it.` };
+      if (col === self) return { ok: false, error: `The equation can't use its own column, “${col.name}”.` };
+      if (["check", "time", "date"].includes(col.type)) return { ok: false, error: `“${col.name}” doesn't hold numbers, so it can't be used in an equation.` };
+      text = text.split(`[${ref}]`).join(`[${col.name}]`);
+    }
+    // A calculated column it uses mustn't, somewhere along the way, use this one.
+    const reaches = (col, seen = []) => {
+      if (seen.includes(col) || col.type !== "calc") return false;
+      const refs = parseEquation(col.equation || "").refs || [];
+      return refs.some((name) => {
+        if (self && sameColumnName(name, self.name)) return true;
+        const next = columns.find((c) => sameColumnName(c.name, name));
+        return !!next && reaches(next, [...seen, col]);
+      });
+    };
+    for (const ref of eq.refs) {
+      if (reaches(columns.find((c) => sameColumnName(c.name, ref)))) return { ok: false, error: `“${ref}” already uses this column, so they would go round in a circle.` };
+    }
+    return { ok: true, text, tree: eq.tree, refs: eq.refs };
+  }
+
+  // The equation as an Excel formula; refOf(columnName) gives the cell, like "C2".
+  function equationToExcel(tree, refOf) {
+    const LEVEL = { "+": 1, "-": 1, "*": 2, "/": 2 };
+    const show = (n, outer = 0, rightSide = false) => {
+      if (n.num !== undefined) return String(n.num);
+      if (n.ref !== undefined) return refOf(n.ref);
+      if (n.neg) return `-${show(n.neg, 3)}`;
+      if (n.pct) return `${show(n.pct, 3)}%`;
+      const level = LEVEL[n.op];
+      const body = `${show(n.a, level)}${n.op}${show(n.b, level, true)}`;
+      return level < outer || (rightSide && level === outer) ? `(${body})` : body;
+    };
+    return show(tree);
+  }
+
+  // ---------- Do the numbers add up? ----------
+  // A column named like a total ("ድምር", "Total") should be the sum of the number columns just before it in the
+  // same group ("ጠዋት የተሰራ: ያደረ" + "ጠዋት የተሰራ: አዲስ የተመረተ" = "ጠዋት የተሰራ: ድምር"), or Qty × Price. A rule only
+  // counts if most of the table's own rows follow it, so an unusual "Total" column doesn't flag every row.
+  const TOTAL_NAME = /(?:^|[\s:])(?:ድምር|ጠቅላላ|total|subtotal|sum)\s*$/i;
+  const isBlank = (v) => v === "" || v == null;
+  const asNumber = (v) => {
+    if (typeof v === "number") return v;
+    const s = String(v ?? "").trim();
+    return /^-?\d+(\.\d+)?$/.test(s) ? Number(s) : null;
+  };
+  const groupOf = (name) => (String(name).includes(":") ? String(name).split(":")[0].trim() : "");
+
+  // columns: [{ name }], rows: [[value…]]. Returns the cells of rows that don't add up, as [{ row, col }].
+  function checkNumbers(columns, rows) {
+    const flagged = new Map();
+    columns.forEach((col, t) => {
+      if (!TOTAL_NAME.test(String(col.name).trim())) return;
+      // The number columns right before the total, nearest first. Empty ones are passed over.
+      const parts = [];
+      for (let k = t - 1; k >= 0 && groupOf(columns[k].name) === groupOf(col.name); k--) {
+        const vals = rows.map((r) => r[k]).filter((v) => !isBlank(v));
+        if (!vals.length) continue;
+        if (vals.some((v) => asNumber(v) === null)) break;
+        parts.push(k);
+      }
+      if (parts.length < 2) return;
+
+      const rules = [];
+      for (let n = 2; n <= parts.length; n++) rules.push({ cols: parts.slice(0, n), blankIsZero: true, calc: (xs) => xs.reduce((a, b) => a + b, 0) });
+      rules.push({ cols: parts.slice(0, 2), blankIsZero: false, calc: ([a, b]) => a * b });
+
+      let best = null;
+      for (const rule of rules) {
+        const wrong = [];
+        let right = 0;
+        rows.forEach((r, i) => {
+          const total = asNumber(r[t]);
+          if (total === null || rule.cols.every((k) => isBlank(r[k]))) return;
+          const xs = rule.cols.map((k) => (isBlank(r[k]) && rule.blankIsZero ? 0 : asNumber(r[k])));
+          if (xs.some((x) => x === null)) return;
+          if (Math.abs(rule.calc(xs) - total) < 0.01) right++;
+          else wrong.push(i);
+        });
+        if (!best || right > best.right) best = { rule, right, wrong };
+      }
+      if (best.right < 2 || best.right / (best.right + best.wrong.length) < 0.6) return;
+      for (const i of best.wrong) {
+        for (const k of [t, ...best.rule.cols]) if (!isBlank(rows[i][k])) flagged.set(`${i}|${k}`, { row: i, col: k });
+      }
+    });
+    return [...flagged.values()];
+  }
+
+  global.ListParser = {
+    parseListText, parseLine, toNumber, analyze, fromTable, checkNumbers,
+    parseEquation, evalEquation, equationValue, validateEquation, equationToExcel, sameColumnName, DIVIDES_BY_ZERO,
+  };
 })(typeof window !== "undefined" ? window : globalThis);

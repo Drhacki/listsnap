@@ -14,7 +14,7 @@
     { id: uid(), name: "Made", type: "check", role: "made" },
     { id: uid(), name: "Date", type: "date", role: "date" },
   ];
-  const TYPE_LABEL = { text: "text", number: "123", time: "AM/PM", check: "✓", date: "date" };
+  const TYPE_LABEL = { text: "text", number: "123", time: "AM/PM", check: "✓", date: "date", calc: "=" };
 
   const state = {
     columns: DEFAULT_COLUMNS(),
@@ -25,6 +25,9 @@
     existing: null, // { kind: "drive", id, name, wb } or { kind: "local", name, wb }
     files: [],
     editingCol: null,
+    scan: { id: null, image: null }, // the last photo read; rows from it carry _scan, for proofreading
+    corrections: [], // what proofreading suggests: [{ row, col, typed, correct }]
+    checkAt: "", // the cell the Next button went to last
   };
 
   // ---------- storage helpers ----------
@@ -34,9 +37,16 @@
   };
   const saveDraft = () => ls.set("listsnap.draft", { columns: state.columns, rows: state.rows });
 
-  function toast(msg, ms = 2600) {
+  // action: optional { label, run } shown as a button in the message, e.g. Undo.
+  function toast(msg, ms = 2600, action) {
     const t = $("toast");
     t.textContent = msg; t.hidden = false;
+    if (action) {
+      const b = document.createElement("button");
+      b.type = "button"; b.className = "toast-action"; b.textContent = action.label;
+      b.onclick = () => { t.hidden = true; action.run(); };
+      t.append(" ", b);
+    }
     clearTimeout(toast._t);
     toast._t = setTimeout(() => (t.hidden = true), ms);
   }
@@ -61,9 +71,10 @@
     const hr = document.createElement("tr");
     for (const col of state.columns) {
       const th = document.createElement("th");
+      if (col.role === "item") th.className = "item-cell";
       const b = document.createElement("button");
       b.className = "colhead"; b.type = "button";
-      b.title = "Edit column";
+      b.title = col.type === "calc" ? `= ${col.equation}` : "Edit column";
       b.textContent = col.name;
       const t = document.createElement("span");
       t.className = "type"; t.textContent = TYPE_LABEL[col.type] || "";
@@ -97,34 +108,234 @@
       tbody.appendChild(tr);
     }
     $("rowCount").textContent = state.rows.length ? `${state.rows.length} row${state.rows.length === 1 ? "" : "s"}` : "";
+    renderProofList();
+    refreshChecks();
   }
 
   function cellEditor(row, col) {
     const td = document.createElement("td");
+    td.dataset.row = row._id;
+    td.dataset.col = col.id;
     let el;
     const v = row[col.id];
+    // Changing a cell counts as checking it, so its marks go away.
+    const edited = () => {
+      if (row._flags) delete row._flags[col.id];
+      if (state.corrections.some((c) => c.row === row && c.col === col)) {
+        state.corrections = state.corrections.filter((c) => !(c.row === row && c.col === col));
+        renderProofList();
+      }
+      saveDraft();
+      refreshChecks();
+    };
+    if (col.type === "calc") {
+      td.className = "calc-cell";
+      td.appendChild(document.createElement("output")); // filled in by refreshChecks
+      return td;
+    }
     if (col.type === "check") {
       td.className = "check-cell";
       el = document.createElement("input"); el.type = "checkbox"; el.checked = !!v;
-      el.onchange = () => { row[col.id] = el.checked; saveDraft(); };
+      el.onchange = () => { row[col.id] = el.checked; edited(); };
     } else if (col.type === "time") {
       el = document.createElement("select");
       for (const opt of ["", "Morning", "Afternoon"]) {
         const o = document.createElement("option"); o.value = opt; o.textContent = opt || "–"; el.appendChild(o);
       }
       el.value = v || "";
-      el.onchange = () => { row[col.id] = el.value; saveDraft(); };
+      el.onchange = () => { row[col.id] = el.value; edited(); };
     } else {
       el = document.createElement("input");
       el.type = col.type === "number" ? "number" : col.type === "date" ? "date" : "text";
       if (col.type === "number") { el.step = "any"; el.inputMode = "decimal"; }
       el.value = v == null ? "" : v;
-      el.oninput = () => { row[col.id] = col.type === "number" && el.value !== "" ? Number(el.value) : el.value; saveDraft(); };
+      el.oninput = () => { row[col.id] = col.type === "number" && el.value !== "" ? Number(el.value) : el.value; edited(); };
       if (col.role === "item") td.className = "item-cell";
     }
     el.setAttribute("aria-label", col.name);
     td.appendChild(el);
     return td;
+  }
+
+  // ---------- checking the table ----------
+  // Colours the cells to look at, and shows how many there are. Red: the row's numbers don't add up.
+  // Yellow: the AI found the cell hard to read. Blue: proofreading suggests a different value.
+  function refreshChecks() {
+    const sums = ListParser.checkNumbers(state.columns, state.rows.map((r) => state.columns.map((c) => r[c.id])));
+    const sumCells = new Set(sums.map((s) => `${state.rows[s.row]._id}|${state.columns[s.col].id}`));
+    const rowsById = new Map(state.rows.map((r) => [r._id, r]));
+    const colsById = new Map(state.columns.map((c) => [c.id, c]));
+    let unsure = 0, fixes = 0, failedCalcs = 0;
+    for (const td of $("grid").tBodies[0].querySelectorAll("td[data-col]")) {
+      const column = colsById.get(td.dataset.col);
+      if (column && column.type === "calc") {
+        const result = ListParser.equationValue(column, state.columns, rowsById.get(td.dataset.row));
+        // Dividing by an empty or zero cell is left empty, as it is in the Excel file: on a form with
+        // unfilled rows that's normal, not a mistake.
+        const zero = result.error === ListParser.DIVIDES_BY_ZERO;
+        const failed = !!result.error && !zero;
+        td.firstChild.textContent = zero ? "" : failed ? "?" : formatNumber(result.value);
+        td.classList.toggle("flag-calc", failed);
+        td.title = result.error || "";
+        if (failed) failedCalcs++;
+        continue;
+      }
+      const flag = rowsById.get(td.dataset.row)?._flags?.[td.dataset.col];
+      const isSum = sumCells.has(`${td.dataset.row}|${td.dataset.col}`);
+      td.classList.toggle("flag-unsure", flag === "unsure");
+      td.classList.toggle("flag-fix", flag === "fix");
+      td.classList.toggle("flag-sum", isSum);
+      td.title = flag === "fix" ? "Proofreading suggests a different value (see the list under the table)"
+        : isSum ? "This row's numbers don't add up"
+        : flag === "unsure" ? "Hard to read: please compare with the photo" : "";
+      if (flag === "unsure") unsure++;
+      if (flag === "fix") fixes++;
+    }
+    const badRows = new Set(sums.map((s) => s.row)).size;
+    const parts = [];
+    if (badRows) parts.push(`🟥 ${badRows === 1 ? "1 row doesn't" : `${badRows} rows don't`} add up`);
+    if (fixes) parts.push(`🟦 ${fixes} suggested fix${fixes === 1 ? "" : "es"}`);
+    if (failedCalcs) parts.push(`🟥 ${failedCalcs} can't be calculated`);
+    if (unsure) parts.push(`🟨 ${unsure} hard to read`);
+    $("checkText").textContent = parts.join(" · ");
+    $("checkBar").hidden = !parts.length;
+
+    const canProof = !!state.scan.image && state.rows.some((r) => r._scan === state.scan.id);
+    $("proofBtn").hidden = !canProof;
+    $("photoPane").hidden = !canProof;
+  }
+
+  const formatNumber = (n) => Number(n.toFixed(2)).toLocaleString("en-US", { maximumFractionDigits: 2 });
+
+  function showCell(td) {
+    state.checkAt = `${td.dataset.row}|${td.dataset.col}`;
+    td.scrollIntoView({ block: "center", inline: "center" });
+    const input = td.querySelector("input,select");
+    if (input) input.focus({ preventScroll: true });
+    // Bring the same part of the photo into view; the row's place in the table is a good guide to its place in the photo.
+    const scanRows = state.rows.filter((r) => r._scan === state.scan.id);
+    const i = scanRows.findIndex((r) => r._id === td.dataset.row);
+    if (i >= 0 && !$("photoPane").hidden) {
+      $("photoPane").open = true;
+      const box = $("photoBox");
+      box.scrollTop = (0.08 + (0.9 * (i + 0.5)) / scanRows.length) * $("checkPhoto").offsetHeight - box.clientHeight / 2;
+    }
+  }
+
+  $("checkNext").onclick = () => {
+    const cells = [...$("grid").tBodies[0].querySelectorAll("td.flag-unsure, td.flag-sum, td.flag-fix, td.flag-calc")];
+    if (!cells.length) return;
+    const at = cells.findIndex((td) => `${td.dataset.row}|${td.dataset.col}` === state.checkAt);
+    showCell(cells[(at + 1) % cells.length]);
+  };
+
+  let photoZoom = 1;
+  function setZoom(z) {
+    photoZoom = Math.min(5, Math.max(1, z));
+    $("checkPhoto").style.width = `${photoZoom * 100}%`;
+  }
+  $("zoomIn").onclick = () => setZoom(photoZoom + 0.5);
+  $("zoomOut").onclick = () => setZoom(photoZoom - 0.5);
+
+  function showScanPhoto() {
+    const img = $("checkPhoto");
+    if (img.src) URL.revokeObjectURL(img.src);
+    img.src = URL.createObjectURL(state.scan.image);
+    setZoom(1);
+  }
+
+  const photoColumns = () => state.columns.filter((c) => c.type !== "calc");
+
+  // Proofreading: an AI compares the table with the photo and lists only what looks wrong.
+  const cellText = (row, col) => {
+    const v = row[col.id];
+    return col.type === "check" ? (v ? "✓" : "") : v == null ? "" : String(v);
+  };
+
+  function clearCorrections() {
+    for (const c of state.corrections) if (c.row._flags) delete c.row._flags[c.col.id];
+    state.corrections = [];
+  }
+
+  $("proofBtn").onclick = async () => {
+    const picked = $("reader").value;
+    const ai = picked !== "free" ? picked : ["gemini", "claude"].find((p) => aiKey(p));
+    if (!ai) { toast("Proofreading uses an AI. Choose Claude or Gemini in the Reader menu and enter its key.", 6000); return; }
+    if (!aiKey(ai)) { openKeyDialog(ai); return; }
+    const rows = state.rows.filter((r) => r._scan === state.scan.id);
+    const cols = photoColumns(); // calculated columns aren't in the photo
+    const btn = $("proofBtn");
+    btn.disabled = true;
+    $("proofStatus").textContent = `${AI[ai].name} is comparing the table with the photo…`;
+    const started = performance.now();
+    try {
+      const found = await ListAI.proofread(ai, state.scan.image, aiKey(ai), cols.map((c) => c.name), rows.map((r) => cols.map((c) => cellText(r, c))), {
+        onNote: (note) => { $("proofStatus").textContent = note; },
+      });
+      clearCorrections();
+      for (const f of found) {
+        const row = rows[f.row], col = cols[f.col];
+        if (cellText(row, col) === f.correct) continue; // the AI repeated what's already there
+        state.corrections.push({ row, col, typed: cellText(row, col), correct: f.correct });
+        row._flags = row._flags || {};
+        row._flags[col.id] = "fix";
+      }
+      const n = state.corrections.length;
+      const secs = Math.round((performance.now() - started) / 1000);
+      $("proofStatus").textContent = n
+        ? `${AI[ai].name} found ${n} thing${n === 1 ? "" : "s"} to look at (${secs} s). Choose below.`
+        : `${AI[ai].name} found no mistakes (${secs} s). It can miss things, so a quick look is still worthwhile.`;
+      saveDraft();
+      renderGrid();
+    } catch (err) {
+      console.error(err);
+      if (err.code === "bad_key") ls.set(AI[ai].storeKey, "");
+      $("proofStatus").textContent = "Couldn't proofread: " + (err.message || err);
+    } finally {
+      btn.disabled = false;
+    }
+  };
+
+  function rowName(row) {
+    const item = state.columns.find((c) => c.role === "item");
+    return (item && cellText(row, item)) || `Row ${state.rows.indexOf(row) + 1}`;
+  }
+
+  function renderProofList() {
+    const box = $("proofList");
+    box.replaceChildren();
+    state.corrections = state.corrections.filter((c) => state.rows.includes(c.row) && state.columns.includes(c.col));
+    box.hidden = !state.corrections.length;
+    const settle = (c, apply) => {
+      if (apply) c.row[c.col.id] = convert(c.correct, c.col.type);
+      if (c.row._flags) delete c.row._flags[c.col.id];
+      state.corrections = state.corrections.filter((x) => x !== c);
+      saveDraft();
+      renderGrid();
+    };
+    for (const c of state.corrections) {
+      const item = document.createElement("div");
+      item.className = "proof-item";
+      const where = document.createElement("button");
+      where.type = "button";
+      where.className = "proof-where";
+      where.textContent = `${rowName(c.row)} · ${c.col.name}: ${c.typed || "(empty)"} → ${c.correct || "(empty)"}`;
+      where.onclick = () => {
+        const td = $("grid").tBodies[0].querySelector(`td[data-row="${c.row._id}"][data-col="${c.col.id}"]`);
+        if (td) showCell(td);
+      };
+      const use = document.createElement("button");
+      use.type = "button"; use.className = "btn small primary"; use.textContent = `Use ${c.correct || "empty"}`;
+      use.onclick = () => settle(c, true);
+      const keep = document.createElement("button");
+      keep.type = "button"; keep.className = "btn small ghost"; keep.textContent = `Keep ${c.typed || "empty"}`;
+      keep.onclick = () => settle(c, false);
+      const buttons = document.createElement("div");
+      buttons.className = "row";
+      buttons.append(use, keep);
+      item.append(where, buttons);
+      box.append(item);
+    }
   }
 
   // ---------- column dialog ----------
@@ -133,27 +344,109 @@
     $("colDialogTitle").textContent = col ? "Edit column" : "New column";
     $("colName").value = col ? col.name : "";
     $("colType").value = col ? col.type : "text";
+    $("colEquation").value = col && col.equation ? col.equation : "";
+    $("colError").hidden = true;
     $("colDelete").hidden = !col;
+    showEquationEditor();
     $("colDialog").returnValue = "";
     $("colDialog").showModal();
     $("colName").focus();
   }
+
+  // The equation editor: a button for each column that can be used, and a live preview on the first row.
+  function showEquationEditor() {
+    const on = $("colType").value === "calc";
+    $("eqWrap").hidden = !on;
+    if (!on) return;
+    const box = $("eqColumns");
+    box.replaceChildren();
+    for (const c of state.columns) {
+      if (c === state.editingCol || c.role === "item" || ["check", "time", "date"].includes(c.type)) continue;
+      const b = document.createElement("button");
+      b.type = "button"; b.className = "btn small"; b.textContent = c.name;
+      b.onclick = () => insertInEquation(`[${c.name}]`);
+      box.append(b);
+    }
+    updateEquationPreview();
+  }
+  function insertInEquation(text) {
+    const input = $("colEquation");
+    const at = input.selectionStart ?? input.value.length;
+    const end = input.selectionEnd ?? at;
+    input.value = input.value.slice(0, at) + text + input.value.slice(end);
+    const caret = at + text.length;
+    input.focus();
+    input.setSelectionRange(caret, caret);
+    updateEquationPreview();
+  }
+  function updateEquationPreview() {
+    const source = $("colEquation").value;
+    const check = source.trim() ? ListParser.validateEquation(source, state.columns, state.editingCol) : null;
+    const line = $("eqPreview");
+    line.classList.toggle("err", !!check && !check.ok);
+    if (!check) { line.textContent = ""; return; }
+    if (!check.ok) { line.textContent = check.error; return; }
+    const first = state.rows[0];
+    if (!first) { line.textContent = "✓ Looks right."; return; }
+    const result = ListParser.equationValue({ equation: source }, state.columns, first);
+    line.textContent = result.error ? `First row: ${result.error}` : `First row: ${formatNumber(result.value)}`;
+  }
+  $("colType").onchange = showEquationEditor;
+  $("colEquation").oninput = updateEquationPreview;
+  document.querySelectorAll("[data-eq]").forEach((b) => { b.onclick = () => insertInEquation(b.dataset.eq); });
+
+  // Enter means OK. (Left alone, the browser would press the form's first button, which is "Delete column".)
+  for (const id of ["colName", "colEquation"]) {
+    $(id).addEventListener("keydown", (e) => {
+      if (e.key !== "Enter") return;
+      e.preventDefault();
+      $("colDialog").querySelector("form").requestSubmit($("colOk"));
+    });
+  }
+
+  // Check the column before the dialog closes, so a mistake can be fixed there.
+  $("colDialog").querySelector("form").addEventListener("submit", (e) => {
+    if (e.submitter?.value !== "ok") return;
+    const self = state.editingCol;
+    const name = $("colName").value.trim();
+    let error = "";
+    if (state.columns.some((c) => c !== self && ListParser.sameColumnName(c.name, name))) {
+      error = `There's already a column called “${name}”.`;
+    } else if ($("colType").value === "calc") {
+      const check = ListParser.validateEquation($("colEquation").value, state.columns, self);
+      if (!check.ok) error = check.error;
+    }
+    $("colError").textContent = error;
+    $("colError").hidden = !error;
+    if (error) e.preventDefault();
+  });
+
+  const usesColumn = (c, name) => (ListParser.parseEquation(c.equation || "").refs || []).some((r) => ListParser.sameColumnName(r, name));
 
   $("colDialog").addEventListener("close", () => {
     const action = $("colDialog").returnValue;
     const col = state.editingCol;
     if (action === "delete" && col) {
       if (state.columns.length <= 1) { toast("A list needs at least one column."); return; }
+      const users = state.columns.filter((c) => c.type === "calc" && usesColumn(c, col.name));
+      if (users.length) { toast(`“${users[0].name}” uses this column in its equation. Change that equation first.`, 6000); return; }
       state.columns = state.columns.filter((c) => c !== col);
     } else if (action === "ok") {
       const name = $("colName").value.trim();
       if (!name) return;
       const type = $("colType").value;
+      const equation = type === "calc" ? ListParser.validateEquation($("colEquation").value, state.columns, col).text : undefined;
       if (col) {
-        if (col.type !== type) for (const r of state.rows) r[col.id] = convert(r[col.id], type);
+        if (col.type !== type && type !== "calc") for (const r of state.rows) r[col.id] = convert(r[col.id], type);
+        // Equations follow a column that gets renamed.
+        if (col.name !== name) {
+          for (const c of state.columns) if (c.type === "calc" && c.equation) c.equation = c.equation.split(`[${col.name}]`).join(`[${name}]`);
+        }
         col.name = name; col.type = type;
+        if (equation) col.equation = equation; else delete col.equation;
       } else {
-        const c = { id: uid(), name, type };
+        const c = { id: uid(), name, type, manual: true }; // added by hand, not read from a photo
+        if (equation) c.equation = equation;
         state.columns.push(c);
         for (const r of state.rows) r[c.id] = type === "check" ? false : type === "date" ? today() : "";
       }
@@ -206,42 +499,193 @@
   $("ocrLang").value = ls.get("listsnap.lang", "eng");
   $("ocrLang").onchange = () => ls.set("listsnap.lang", $("ocrLang").value);
 
+  // ---------- Reader: free on this device, or an AI with the person's own API key ----------
+  const AI = {
+    claude: {
+      name: "Claude", company: "Anthropic", storeKey: "listsnap.claudeKey", placeholder: "sk-ant-…",
+      keyUrl: "https://console.anthropic.com/settings/keys", keySite: "console.anthropic.com",
+      keyHow: " (API keys), add a little credit, and paste the key here.",
+      note: "More accurate for forms, Amharic and handwriting. The photo is sent to Anthropic, and each one costs a few US cents.",
+    },
+    gemini: {
+      name: "Gemini", company: "Google", storeKey: "listsnap.geminiKey", placeholder: "AIza…",
+      keyUrl: "https://aistudio.google.com/app/apikey", keySite: "aistudio.google.com",
+      keyHow: " (Get API key) and paste the key here. A free key works.",
+      note: "More accurate for forms, Amharic and handwriting. The photo is sent to Google. Free keys cost nothing but allow only about 20 requests a day per model, and Google may use those photos to improve its products. Paid keys cost about 1–3 US cents a photo.",
+    },
+  };
+  const FREE_NOTE = "Reads on this device, so the photo never leaves it. Best for clear, printed lists.";
+  const aiKey = (p) => ls.get(AI[p].storeKey, "");
+  let keyFor = "claude"; // which AI the key dialog is for
+
+  function openKeyDialog(p) {
+    const ai = AI[p];
+    keyFor = p;
+    $("keyTitle").textContent = `${ai.name} API key`;
+    $("keyHelp").textContent = `Reading with ${ai.name} uses your own ${ai.company} API key. Create one at`;
+    $("keyLink").href = ai.keyUrl;
+    $("keyLink").textContent = ai.keySite;
+    $("keyHelpEnd").textContent = `${ai.keyHow} It is saved only on this device.`;
+    $("keyPrivacy").textContent = ai.note;
+    $("keyInput").placeholder = ai.placeholder;
+    $("keyInput").value = aiKey(p);
+    $("keyForget").hidden = !aiKey(p);
+    $("keyDialog").returnValue = "";
+    $("keyDialog").showModal();
+    $("keyInput").focus();
+  }
+  // Enter in the key box means Save (the form's first button is "Remove key").
+  $("keyInput").addEventListener("keydown", (e) => { if (e.key === "Enter") { e.preventDefault(); $("keyDialog").close("ok"); } });
+  $("keyDialog").addEventListener("close", () => {
+    const action = $("keyDialog").returnValue;
+    if (action === "ok" && $("keyInput").value.trim()) ls.set(AI[keyFor].storeKey, $("keyInput").value.trim());
+    else if (action === "forget") ls.set(AI[keyFor].storeKey, "");
+    if ($("reader").value === keyFor && !aiKey(keyFor)) $("reader").value = "free"; // no key, no AI
+    ls.set("listsnap.reader", $("reader").value);
+    showReader();
+  });
+  function showReader() {
+    const r = $("reader").value;
+    $("langWrap").hidden = r !== "free"; // the AIs read any language by themselves
+    $("aiKeyBtn").hidden = r === "free";
+    if (r !== "free") $("aiKeyBtn").textContent = `${AI[r].name} API key`;
+    $("readerNote").textContent = r === "free" ? FREE_NOTE : AI[r].note;
+  }
+  // Earlier versions had a "Read with Claude" tick box instead of the Reader menu.
+  const savedReader = ls.get("listsnap.reader", ls.get("listsnap.useClaude", false) ? "claude" : "free");
+  $("reader").value = AI[savedReader] && aiKey(savedReader) ? savedReader : "free";
+  $("reader").onchange = () => {
+    const r = $("reader").value;
+    ls.set("listsnap.reader", r);
+    if (r !== "free" && !aiKey(r)) openKeyDialog(r);
+    ListAI.preload(r);
+    showReader();
+  };
+  $("aiKeyBtn").onclick = () => openKeyDialog($("reader").value);
+  showReader();
+  setTimeout(() => ListAI.preload($("reader").value), 1500); // once the page is up, so it doesn't slow the opening
+
+  let putAside = null; // the table that a new picture's own columns replaced, for Undo
+
   $("readBtn").onclick = async () => {
     if (!state.image) return;
+    putAside = null;
+    const reader = $("reader").value;
+    if (reader !== "free" && !aiKey(reader)) { openKeyDialog(reader); return; }
     const btn = $("readBtn");
     btn.disabled = true;
     $("progressWrap").hidden = false;
     setProgress(0, "Starting…");
+    const started = performance.now();
+    const earlierScan = state.scan;
+    state.scan = { id: uid(), image: state.image };
     try {
-      const { text, lines, grid } = await ListOCR.readImage(state.image, $("ocrLang").value, (m) => {
-        if (m.status === "recognizing text") setProgress(m.progress, `Reading… ${Math.round(m.progress * 100)}%`);
-        else if (/loading|initializ/i.test(m.status)) setProgress(m.progress || 0.05, "Getting the reader ready (first time only)…");
-      });
-      $("rawText").textContent = text.trim() || "(no text found)";
-      $("rawWrap").hidden = false;
       const hadRows = state.rows.length;
-      let count;
-      if ($("imageColumns").checked) {
-        const result = ListParser.analyze(text, lines, grid);
-        count = result.rows.length;
-        if (count) addImageRows(result);
-      } else {
-        const parsed = ListParser.parseListText(text);
-        count = parsed.length;
-        for (const p of parsed) state.rows.push(rowFromParsed(p));
+      const count = reader === "free" ? await readWithScanner() : await readWithAI(reader);
+      if (!count) {
+        state.scan = earlierScan;
+        toast("No list lines were found. Try a sharper, brighter photo taken straight on.");
+        return;
       }
-      if (!count) { toast("No list lines were found. Try a sharper, brighter photo taken straight on."); return; }
+      clearCorrections();
+      $("proofStatus").textContent = "";
+      showScanPhoto();
+      ListExcel.preload(); // saving is likely next
       saveDraft(); renderGrid(); renderTemplates();
-      setProgress(1, `Found ${count} line${count === 1 ? "" : "s"}`);
-      toast(hadRows && state.rows.length > count ? `Added ${count} rows under the ones already in the table.` : `Found ${count} rows. Please check them.`);
+      const secs = Math.round((performance.now() - started) / 1000);
+      setProgress(1, `Found ${count} line${count === 1 ? "" : "s"} in ${secs} s`);
+      const marked = state.rows.filter((r) => r._scan === state.scan.id).reduce((n, r) => n + Object.keys(r._flags || {}).length, 0);
+      const toCheck = marked ? ` ${marked} hard-to-read cell${marked === 1 ? " is" : "s are"} marked yellow.` : "";
+      if (putAside) {
+        const old = putAside;
+        const n = old.rows.length;
+        toast(`Found ${count} row${count === 1 ? "" : "s"}.${toCheck} This picture has its own columns, so it got a new table. ${n} earlier row${n === 1 ? " was" : "s were"} put aside.`, 12000, {
+          label: "Undo",
+          run: () => { state.columns = old.columns; state.rows = old.rows; saveDraft(); renderGrid(); toast("The earlier table is back."); },
+        });
+      } else {
+        const rowsWord = `${count} row${count === 1 ? "" : "s"}`;
+        toast((hadRows && state.rows.length > count ? `Added ${rowsWord} under the ones already in the table.` : `Found ${rowsWord}. Please check them.`) + toCheck, toCheck ? 6000 : undefined);
+      }
     } catch (err) {
       console.error(err);
-      toast("Couldn't read the image: " + (err.message || err));
+      state.scan = earlierScan;
+      if (err.code === "bad_key") ls.set(AI[reader].storeKey, "");
+      toast("Couldn't read the image: " + (err.message || err), 8000);
       $("progressWrap").hidden = true;
     } finally {
       btn.disabled = false;
     }
   };
+
+  // The free reader on this device. Returns how many rows were added.
+  async function readWithScanner() {
+    const { text, lines, grid } = await ListOCR.readImage(state.image, $("ocrLang").value, (m) => {
+      if (m.status === "recognizing text") setProgress(m.progress, `Reading… ${Math.round(m.progress * 100)}%`);
+      else if (/loading|initializ/i.test(m.status)) setProgress(m.progress || 0.05, "Getting the reader ready (first time only)…");
+    });
+    $("rawText").textContent = text.trim() || "(no text found)";
+    $("rawWrap").hidden = false;
+    if ($("imageColumns").checked) {
+      const result = ListParser.analyze(text, lines, grid);
+      if (result.rows.length) addImageRows(result);
+      return result.rows.length;
+    }
+    const parsed = ListParser.parseListText(text);
+    for (const p of parsed) {
+      const r = rowFromParsed(p);
+      r._scan = state.scan.id;
+      state.rows.push(r);
+    }
+    return parsed.length;
+  }
+
+  // Marks the cells an AI found hard to read. cols: the table's column for each of the AI's columns.
+  function markUnsure(r, i, unsure, cols) {
+    for (const u of unsure || []) {
+      if (u.row !== i || !cols[u.col]) continue;
+      r._flags = r._flags || {};
+      r._flags[cols[u.col].id] = "unsure";
+    }
+  }
+
+  // An AI (Claude or Gemini) reads the photo on its company's computers: it may cost a little, but it handles
+  // forms, Amharic and handwriting. The answer arrives bit by bit, so the message can show real progress.
+  // Returns how many rows were added.
+  async function readWithAI(ai) {
+    const name = AI[ai].name;
+    let msg = `${name} is looking at the photo…`;
+    let p = 0.1;
+    setProgress(p, msg);
+    const creep = setInterval(() => setProgress((p = Math.min(0.9, p + 0.02)), msg), 1000);
+    const onRows = (n) => {
+      if (!n) return;
+      msg = `${name} has read ${n} row${n === 1 ? "" : "s"}…`;
+      setProgress(p, msg);
+    };
+    const onNote = (note) => { msg = note; setProgress(p, msg); };
+    $("rawWrap").hidden = true;
+    try {
+      if ($("imageColumns").checked) {
+        const { columns, rows, unsure } = await ListAI.readTable(ai, state.image, aiKey(ai), null, { onRows, onNote });
+        const result = ListParser.fromTable(columns, rows);
+        if (result.rows.length) addImageRows({ ...result, unsure });
+        return result.rows.length;
+      }
+      const cols = photoColumns();
+      const { rows, unsure } = await ListAI.readTable(ai, state.image, aiKey(ai), cols.map((c) => c.name), { onRows, onNote });
+      rows.forEach((values, i) => {
+        const r = blankRow();
+        r._scan = state.scan.id;
+        cols.forEach((col, k) => { if (values[k]) r[col.id] = convert(values[k], col.type); });
+        markUnsure(r, i, unsure, cols);
+        state.rows.push(r);
+      });
+      return rows.length;
+    } finally {
+      clearInterval(creep);
+    }
+  }
 
   function setProgress(p, text) {
     $("progressBar").style.width = `${Math.round(Math.max(0, Math.min(1, p)) * 100)}%`;
@@ -249,41 +693,62 @@
   }
 
   // Columns come from the picture. An empty table takes the picture's columns as they are.
-  // A table that already has rows keeps its columns, and the picture's columns are matched to them by name
-  // (or by meaning, e.g. "ብዛት" → Qty). Any new ones are added on the right.
-  // If the picture's header is a different table altogether, ask before mixing the two.
-  function addImageRows({ columns, rows, fromHeader }) {
+  // A picture with its own header row that doesn't match the table on screen starts a new table; the old one
+  // is put aside so Undo can bring it back. Otherwise the rows go under the table: header columns are matched
+  // by name only, and new ones are added on the right. Lists without a header (whose Item, Qty, … names
+  // ListSnap chose itself) are also matched by meaning, so their Qty finds a "ብዛት" column.
+  function addImageRows({ columns, rows, fromHeader, unsure }) {
     const sameName = (a, b) => a.trim().toLowerCase() === b.trim().toLowerCase();
     if (state.rows.length && fromHeader) {
       const matching = columns.filter((c) => state.columns.some((o) => sameName(o.name, c.name))).length;
-      if (matching < columns.length / 2 && confirm(
-        `This picture has different columns (${columns.map((c) => c.name).join(", ")}) from your table (${state.columns.map((c) => c.name).join(", ")}).\n\n` +
-        `OK: start a new table with the picture's columns. The ${state.rows.length} row${state.rows.length === 1 ? "" : "s"} now in the table will be removed.\n` +
-        `Cancel: add the picture's rows under your current table.`)) {
+      if (matching < columns.length / 2) {
+        putAside = { columns: state.columns, rows: state.rows };
         state.rows = [];
       }
     }
     let target;
     if (!state.rows.length) {
-      state.columns = columns.map((c) => ({ id: uid(), name: c.name, type: c.type, role: c.role || undefined }));
-      target = state.columns;
+      target = columns.map((c) => ({ id: uid(), name: c.name, type: c.type, role: c.role || undefined }));
+      // Calculated columns stay, so an equation set up once works for the next day's sheet too. It needs at least
+      // one of its columns in the new picture (otherwise it's a different form); the rest must be columns the
+      // person added themselves, like a Price the photo doesn't have, and those stay with it.
+      const have = target.map((c) => c.name);
+      const added = (name) => state.columns.find((o) => o.manual && o.type !== "calc" && sameName(o.name, name));
+      const kept = [];
+      for (const c of state.columns) {
+        if (c.type !== "calc" || have.some((n) => sameName(n, c.name))) continue;
+        const refs = ListParser.parseEquation(c.equation || "").refs || [];
+        const missing = refs.filter((ref) => !have.some((n) => sameName(n, ref)));
+        if (missing.length === refs.length || !missing.every(added)) continue;
+        for (const ref of missing) { kept.push(added(ref)); have.push(ref); }
+        kept.push(c);
+        have.push(c.name);
+      }
+      state.columns = [...target, ...kept];
     } else {
       const used = new Set();
       target = columns.map((c) => {
         const hit = state.columns.find((o) => !used.has(o) && sameName(o.name, c.name))
-          || (c.role && state.columns.find((o) => !used.has(o) && o.role === c.role));
-        if (hit) { used.add(hit); return hit; }
+          || (!fromHeader && c.role && state.columns.find((o) => !used.has(o) && o.role === c.role));
+        if (hit) {
+          // A column that is still empty (say, from a blank form) takes the type the new values have.
+          if (hit.type === "text" && c.type !== "text" && state.rows.every((r) => r[hit.id] === "" || r[hit.id] == null)) hit.type = c.type;
+          used.add(hit);
+          return hit;
+        }
         const col = { id: uid(), name: c.name, type: c.type, role: c.role || undefined };
         state.columns.push(col);
         for (const r of state.rows) r[col.id] = col.type === "check" ? false : "";
         return col;
       });
     }
-    for (const values of rows) {
+    rows.forEach((values, i) => {
       const r = blankRow();
+      r._scan = state.scan.id;
       target.forEach((col, k) => { r[col.id] = convert(values[k], col.type); });
+      markUnsure(r, i, unsure, target);
       state.rows.push(r);
-    }
+    });
   }
 
   function rowFromParsed(p) {
@@ -342,7 +807,7 @@
   $("saveTemplateBtn").onclick = async () => {
     const name = prompt("Name for this list template (for example “Bakery morning list”):");
     if (!name || !name.trim()) return;
-    const cols = state.columns.map(({ name, type, role }) => ({ name, type, role }));
+    const cols = state.columns.map(({ name, type, role, equation, manual }) => ({ name, type, role, equation, manual }));
     const existing = state.templates.findIndex((t) => t.name.toLowerCase() === name.trim().toLowerCase());
     if (existing >= 0) state.templates[existing].columns = cols;
     else state.templates.push({ name: name.trim(), columns: cols });
@@ -395,6 +860,7 @@
       $("modeNew").hidden = state.saveMode !== "new";
       $("modeExisting").hidden = state.saveMode !== "existing";
       status("");
+      if (state.saveMode === "existing") ListExcel.preload();
       if (state.saveMode === "existing" && Drive.isSignedIn() && !state.files.length) refreshFiles();
     };
   });
@@ -440,7 +906,7 @@
     const sel = $("sheetSelect");
     sel.innerHTML = "";
     if (!state.existing) { sel.disabled = true; $("newTabName").hidden = true; $("existingInfo").textContent = ""; return; }
-    for (const name of state.existing.wb.SheetNames) {
+    for (const name of ListExcel.sheetNames(state.existing.wb)) {
       const o = document.createElement("option"); o.value = name; o.textContent = `Tab: ${name}`; sel.appendChild(o);
     }
     const n = document.createElement("option"); n.value = "__new__"; n.textContent = "+ New tab (a new list)"; sel.appendChild(n);
@@ -453,10 +919,9 @@
     const isNew = sel.value === "__new__";
     $("newTabName").hidden = !isNew;
     if (isNew) { $("existingInfo").textContent = "A new tab is created with the columns in your table."; return; }
-    const ws = state.existing.wb.Sheets[sel.value];
-    const { headers } = ListExcel.readHeaders(ws);
-    const names = headers.map((h) => h.name.toLowerCase());
-    const missing = state.columns.filter((c) => !names.includes(c.name.trim().toLowerCase())).map((c) => c.name);
+    const { headers } = ListExcel.readHeaders(state.existing.wb, sel.value);
+    const names = headers.map((h) => ListExcel.normName(h.name));
+    const missing = state.columns.filter((c) => !names.includes(ListExcel.normName(c.name))).map((c) => c.name);
     $("existingInfo").textContent = headers.length
       ? `This tab's columns: ${headers.map((h) => h.name).join(", ")}.` + (missing.length ? ` New columns that will be added: ${missing.join(", ")}.` : " Every column matches.")
       : "This tab is empty, so your columns become its headers.";
@@ -471,7 +936,7 @@
     status("Opening file…");
     try {
       const buf = await Drive.download(v);
-      state.existing = { kind: "drive", id: v, name: f.name, wb: ListExcel.readWorkbook(buf) };
+      state.existing = { kind: "drive", id: v, name: f.name, wb: await ListExcel.readWorkbook(buf) };
       renderSheetSelect(); status("");
     } catch (e) { status(e.message, "err"); }
   };
@@ -480,7 +945,8 @@
     const file = e.target.files[0];
     if (!file) return;
     try {
-      const wb = ListExcel.readWorkbook(await file.arrayBuffer());
+      status("Opening file…");
+      const wb = await ListExcel.readWorkbook(await file.arrayBuffer());
       state.existing = { kind: "local", name: ListExcel.ensureXlsxName(file.name), wb };
       renderFileSelect();
       $("fileSelect").value = "local";
@@ -520,14 +986,14 @@
 
   async function saveNew(rows) {
     const fileName = ListExcel.ensureXlsxName($("newFileName").value || `ListSnap ${today()}`);
-    const wb = ListExcel.buildWorkbook($("newSheetName").value, state.columns, rows);
+    const wb = await ListExcel.buildWorkbook($("newSheetName").value, state.columns, rows);
     if (Drive.isSignedIn()) {
-      const f = await Drive.saveXlsx({ name: fileName, data: ListExcel.toArrayBuffer(wb) });
-      if ($("alsoDownload").checked) ListExcel.download(wb, fileName);
+      const f = await Drive.saveXlsx({ name: fileName, data: await ListExcel.toArrayBuffer(wb) });
+      if ($("alsoDownload").checked) await ListExcel.download(wb, fileName);
       status(`Saved “${f.name}” to Google Drive (${rows.length} rows).`, "ok");
       await refreshFiles();
     } else {
-      ListExcel.download(wb, fileName);
+      await ListExcel.download(wb, fileName);
       status(`Downloaded “${fileName}” (${rows.length} rows).` + (Drive.configured() ? " Sign in to keep files in sync across your devices." : ""), "ok");
     }
     afterSave();
@@ -538,38 +1004,50 @@
     let sheet = $("sheetSelect").value;
     if (sheet === "__new__") {
       sheet = ListExcel.safeSheetName($("newTabName").value || `List ${today()}`);
-      if (state.existing.wb.SheetNames.includes(sheet)) throw new Error(`There's already a tab called “${sheet}”. Pick it from the list or use another name.`);
+      if (ListExcel.sheetNames(state.existing.wb).includes(sheet)) throw new Error(`There's already a tab called “${sheet}”. Pick it from the list or use another name.`);
     }
 
     // Download a fresh copy from Drive so changes made on another device aren't overwritten.
     if (state.existing.kind === "drive") {
-      state.existing.wb = ListExcel.readWorkbook(await Drive.download(state.existing.id));
+      state.existing.wb = await ListExcel.readWorkbook(await Drive.download(state.existing.id));
     }
     const wb = state.existing.wb;
     const res = ListExcel.appendToWorkbook(wb, sheet, state.columns, rows);
-    const extra = res.createdSheet ? ` in the new tab “${sheet}”` : res.newColumns.length ? `. Added columns: ${res.newColumns.join(", ")}` : "";
+    const added = `Added ${res.added} row${res.added === 1 ? "" : "s"}`;
+    const extra = appendNotes(res, sheet);
 
     if (state.existing.kind === "drive") {
-      await Drive.saveXlsx({ fileId: state.existing.id, data: ListExcel.toArrayBuffer(wb) });
-      if ($("alsoDownload").checked) ListExcel.download(wb, state.existing.name);
-      status(`Added ${res.added} rows to “${state.existing.name}”${extra}.`, "ok");
+      await Drive.saveXlsx({ fileId: state.existing.id, data: await ListExcel.toArrayBuffer(wb) });
+      if ($("alsoDownload").checked) await ListExcel.download(wb, state.existing.name);
+      status(`${added} to “${state.existing.name}”${extra}.`, "ok");
     } else if (Drive.isSignedIn()) {
-      const f = await Drive.saveXlsx({ name: state.existing.name, data: ListExcel.toArrayBuffer(wb) });
-      if ($("alsoDownload").checked) ListExcel.download(wb, state.existing.name);
+      const f = await Drive.saveXlsx({ name: state.existing.name, data: await ListExcel.toArrayBuffer(wb) });
+      if ($("alsoDownload").checked) await ListExcel.download(wb, state.existing.name);
       await refreshFiles();
       state.existing = { kind: "drive", id: f.id, name: f.name, wb };
       renderFileSelect();
       $("fileSelect").value = f.id;
-      status(`Added ${res.added} rows${extra} and uploaded “${f.name}” to Google Drive.`, "ok");
+      status(`${added}${extra}. Uploaded “${f.name}” to Google Drive.`, "ok");
     } else {
-      ListExcel.download(wb, state.existing.name);
-      status(`Added ${res.added} rows${extra}. The updated “${state.existing.name}” was downloaded.`, "ok");
+      await ListExcel.download(wb, state.existing.name);
+      status(`${added}${extra}. The updated “${state.existing.name}” was downloaded.`, "ok");
     }
     if (state.existing.kind === "drive") await refreshFiles();
     renderSheetSelect();
     $("sheetSelect").value = sheet;
     updateExistingInfo();
     afterSave();
+  }
+
+  // What else happened while adding the rows, for the message after saving.
+  function appendNotes(res, sheet) {
+    if (res.createdSheet) return ` in the new tab “${sheet}”`;
+    const notes = [];
+    if (res.aboveTotal) notes.push("They're above the Total row, which now includes them");
+    if (res.formulaColumns.length) notes.push(`Calculated by your formulas: ${res.formulaColumns.join(", ")}`);
+    if (res.filledColumns.length) notes.push(`Filled in from earlier rows: ${res.filledColumns.join(", ")}`);
+    if (res.newColumns.length) notes.push(`New columns: ${res.newColumns.join(", ")}`);
+    return notes.length ? `. ${notes.join(". ")}` : "";
   }
 
   function afterSave() {

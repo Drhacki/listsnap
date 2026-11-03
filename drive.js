@@ -36,6 +36,7 @@
 
   async function init() {
     if (!configured()) return false;
+    await loadScript("https://accounts.google.com/gsi/client"); // only needed when Google sign-in is set up
     await waitForGis();
     tokenClient = google.accounts.oauth2.initTokenClient({
       client_id: cfg().GOOGLE_CLIENT_ID,

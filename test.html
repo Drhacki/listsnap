@@ -18,10 +18,10 @@
   <p>Checks the list parser, the Excel append logic, and real OCR on the images in <code>samples/</code>.</p>
   <div id="log"></div>
   <pre id="out"></pre>
-  <script src="https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js"></script>
-  <script src="https://cdn.jsdelivr.net/npm/tesseract.js@5.1.1/dist/tesseract.min.js"></script>
+  <script src="load.js"></script>
   <script src="parse.js"></script>
   <script src="ocr.js"></script>
+  <script src="ai.js"></script>
   <script src="excel.js"></script>
   <script>
   (async () => {
@@ -110,23 +110,243 @@
     log(eq(a.columns.map((c) => `${c.name}:${c.type}:${c.role}`), ["No:number:qty", "Item:text:item", "Status:text:null"]) && eq(a.rows, [[1, "Bread", "Done"], [2, "Milk", "Not started"]]),
       "grid: a printed No. column is kept, and a Status column of words stays text", JSON.stringify(a));
 
+    // --- equation columns ---
+    const eqCols = [
+      { id: "a", name: "ጠዋት: ድምር", type: "number" }, { id: "b", name: "የተበላሸ", type: "number" }, { id: "p", name: "Price", type: "number" },
+      { id: "s", name: "Status", type: "text" }, { id: "d", name: "Made", type: "check" },
+    ];
+    const calc = (equation, row, cols = eqCols) => ListParser.equationValue({ equation }, cols, row);
+    log(calc("([ጠዋት: ድምር] − [የተበላሸ]) × [Price]", { a: 100, b: 2, p: 10 }).value === 980, "equation: brackets, − and × work");
+    log(calc("[ጠዋት: ድምር] - [የተበላሸ] * [Price]", { a: 100, b: 2, p: 10 }).value === 80, "equation: × goes before −");
+    log(calc("[Price] * 15% + 1", { p: 200 }).value === 31, "equation: percent and plain numbers");
+    log(calc("= -[Price] / 2", { p: 10 }).value === -5, "equation: a leading = and a minus sign");
+    log(calc("Price x 2", { p: 10 }).value === 20 && calc("[Price] x 2", { p: 10 }).value === 20 && calc("[Price] x [የተበላሸ]", { p: 10, b: 3 }).value === 30, "equation: a name without [ ] and x for ×");
+    log(calc("[ጠዋት: ድምር] + [Price]", { a: 5 }).value === 5, "equation: a blank cell counts as 0, as in Excel");
+    log(calc("[Price] × 2", { p: "12" }).value === 24, "equation: a number kept as text still counts");
+    log(/isn't a number/.test(calc("[Status] × 2", { s: "Not started" }).error), "equation: words give a clear message", JSON.stringify(calc("[Status] × 2", { s: "Not started" })));
+    log(/zero/.test(calc("[Price] ÷ [የተበላሸ]", { p: 5, b: 0 }).error), "equation: dividing by zero gives a clear message");
+    const eqBad = (t) => ListParser.validateEquation(t, eqCols, null);
+    log(!eqBad("[Nope] + 1").ok && !eqBad("[Price] +").ok && !eqBad("[Price] [Status]").ok && !eqBad("([Price]").ok && !eqBad("").ok && !eqBad("[Made] + 1").ok,
+      "equation: mistakes and non-number columns are refused", JSON.stringify(["[Nope] + 1", "[Price] +", "[Price] [Status]", "([Price]", "", "[Made] + 1"].map((t) => eqBad(t).error)));
+    log(eqBad("alert(1)").ok === false && eqBad("constructor.constructor('x')()").ok === false, "equation: code can't be run through it");
+    log(eqBad("[price]*2").text === "[Price] × 2", "equation: tidied, with the column's real name", eqBad("[price]*2").text);
+    {
+      const toX = (t) => ListParser.equationToExcel(ListParser.parseEquation(t).tree, (n) => ({ A: "C2", B: "D2", C: "E2" })[n]);
+      const pairs = [["([A] − [B]) × [C]", "(C2-D2)*E2"], ["[A] − [B] × [C]", "C2-D2*E2"], ["[A] − ([B] − [C])", "C2-(D2-E2)"], ["[A] ÷ ([B] × [C])", "C2/(D2*E2)"], ["[A] × 15%", "C2*15%"], ["-[A] + 2", "-C2+2"]];
+      log(pairs.every(([a, b]) => toX(a) === b), "equation: turned into Excel formulas with the right brackets", JSON.stringify(pairs.map(([a]) => toX(a))));
+      const cols = [{ id: "x", name: "Total", type: "calc", equation: "[Y] + 1" }, { id: "y", name: "Y", type: "calc", equation: "[Total] + 1" }];
+      log(/own result/.test(ListParser.equationValue(cols[0], cols, {}).error), "equation: columns that go round in a circle give a message, not a hang");
+      log(!ListParser.validateEquation("[Total] × 2", cols, cols[1]).ok, "equation: a circle is refused when setting it up");
+    }
+
+    // --- do the numbers add up? ---
+    const named = (...names) => names.map((name) => ({ name }));
+    let flags = ListParser.checkNumbers(named("ዳቦ", "ጠዋት: ያደረ", "ጠዋት: አዲስ", "ጠዋት: ድምር", "ጠዋት: የተበላሸ"), [
+      ["ባለ 10", 5, 95, 100, 2],
+      ["ባለ 25", "", 40, 40, 0],
+      ["ባለ 30", 10, 20, 35, 1],
+      ["ባለ 45", 1, 1, 2, 0],
+    ]);
+    log(eq(flags, [{ row: 2, col: 3 }, { row: 2, col: 2 }, { row: 2, col: 1 }]), "a row whose parts don't add up to its ድምር is flagged (blank counts as 0)", JSON.stringify(flags));
+    flags = ListParser.checkNumbers(named("Item", "Qty", "Price", "Total"), [["A", 2, 5, 10], ["B", 3, 4, 12], ["C", 2, 2, 5]]);
+    log(eq(flags.map((f) => f.row), [2, 2, 2]), "Qty × Price = Total is checked too", JSON.stringify(flags));
+    flags = ListParser.checkNumbers(named("Item", "Qty", "Price", "Total"), [["A", 2, 5, 99], ["B", 3, 4, 7], ["C", 2, 2, 50]]);
+    log(eq(flags, []), "a Total column that follows no rule flags nothing", JSON.stringify(flags));
+    flags = ListParser.checkNumbers(named("No", "Morning", "Afternoon", "Total"), [[1, 5, 5, 10], [2, 3, 4, 7], [3, 1, 1, 9]]);
+    log(eq(flags.map((f) => f.row), [2, 2, 2]) && !flags.some((f) => f.col === 0), "a No. column isn't counted in the sum", JSON.stringify(flags));
+
+    // --- following an AI's answer as it arrives ---
+    log(ListAI.countRows('{"columns":["a","b"],"rows":[["1","x]"],["2"') === 1, "rows are counted while the answer is still arriving");
+    log(ListAI.countRows('{"columns":["a"],"rows":[["1"],["2"],["3"]],"unsure":[{"row":1,"column":"a"}]}') === 3, "the count stops at the end of the rows");
+    log(ListAI.geminiSchema({ type: "array", items: { type: "object", properties: { a: { type: "integer" } }, required: ["a"], additionalProperties: false } }).items.properties.a.type === "INTEGER", "schemas are converted to Gemini's format");
+
+    // --- Gemini: busy models, used-up allowances and the backup model (stand-in replies, nothing is sent) ---
+    {
+      const photo = new File([await (await fetch("samples/printed-list.png")).blob()], "p.png", { type: "image/png" });
+      const realFetch = window.fetch;
+      const LIMITS = "listsnap.geminiLimits";
+      const savedLimits = localStorage.getItem(LIMITS);
+      localStorage.removeItem(LIMITS);
+      const good = () => new Response(new TextEncoder().encode("data: " + JSON.stringify({ candidates: [{ finishReason: "STOP", content: { parts: [{ text: '{"corrections":[]}' }] } }] }) + "\n\n"), { status: 200 });
+      const busy = () => new Response(JSON.stringify({ error: { status: "UNAVAILABLE", message: "high demand" } }), { status: 503 });
+      const dayLimit = () => new Response(JSON.stringify({ error: { status: "RESOURCE_EXHAUSTED", details: [{ retryDelay: "7037s" }] } }), { status: 429 });
+      let calls, answers;
+      window.fetch = async (input, init) => {
+        const url = typeof input === "string" ? input : input.url;
+        if (!url.includes("generativelanguage")) return realFetch(input, init);
+        const model = url.match(/models\/([^:]+):/)[1];
+        calls.push(model);
+        return answers(model, calls.length);
+      };
+      const ask = async () => {
+        const notes = [];
+        try { await ListAI.proofread("gemini", photo, "test-key", ["a"], [["1"]], { onNote: (n) => notes.push(n) }); return { ok: true, notes }; }
+        catch (e) { return { ok: false, message: e.message, notes }; }
+      };
+      calls = []; answers = (model, n) => (n === 1 ? busy() : good());
+      let r = await ask();
+      log(r.ok && eq(calls, ["gemini-3.8-flash", "gemini-3.8-flash"]), "a busy Gemini is tried once more", JSON.stringify({ calls, r }));
+
+      calls = []; answers = (model) => (model === "gemini-3.8-flash" ? busy() : good());
+      r = await ask();
+      log(r.ok && eq(calls, ["gemini-3.8-flash", "gemini-3.8-flash", "gemini-3.6-flash"]), "if it stays busy, the backup model takes over", JSON.stringify({ calls, r }));
+
+      calls = []; answers = (model) => (model === "gemini-3.8-flash" ? dayLimit() : good());
+      r = await ask();
+      log(r.ok && eq(calls, ["gemini-3.8-flash", "gemini-3.6-flash"]), "a used-up daily allowance goes straight to the backup model", JSON.stringify({ calls, r }));
+      calls = [];
+      r = await ask();
+      log(r.ok && eq(calls, ["gemini-3.6-flash"]), "and the next photo doesn't waste a request on the used-up model", JSON.stringify({ calls, r }));
+
+      calls = []; answers = () => dayLimit();
+      r = await ask();
+      log(!r.ok && /used up today's free requests.*about 2 hours/.test(r.message) && eq(calls, ["gemini-3.6-flash"]), "when both are used up, the message says when they come back", JSON.stringify({ calls, r }));
+
+      window.fetch = realFetch;
+      if (savedLimits) localStorage.setItem(LIMITS, savedLimits); else localStorage.removeItem(LIMITS);
+    }
+
+    // --- a table read by Claude (cells already known) ---
+    a = ListParser.fromTable(
+      ["ተ.ቁ", "የዳቦ አይነት", "ጠዋት የተሰራ: ያደረ", "ጠዋት የተሰራ: ምክንያት"],
+      [["1", "ባለ 10", "12", ""], ["2", "ባለ 25", "፲፪", "ተቃጥሏል"]]);
+    log(eq(a.columns.map((c) => `${c.name}:${c.type}:${c.role}`), ["ተ.ቁ:number:null", "የዳቦ አይነት:text:item", "ጠዋት የተሰራ: ያደረ:number:null", "ጠዋት የተሰራ: ምክንያት:text:null"])
+      && eq(a.rows, [[1, "ባለ 10", 12, ""], [2, "ባለ 25", 12, "ተቃጥሏል"]]),
+      "Claude table: the No. column stays numbers, bread names are the items, Ethiopic numerals become numbers", JSON.stringify(a));
+
     // --- excel ---
     const cols = [
       { id: "a", name: "Item", type: "text", role: "item" },
       { id: "b", name: "Qty", type: "number", role: "qty" },
       { id: "c", name: "Made", type: "check", role: "made" },
     ];
-    const wb = ListExcel.buildWorkbook("List", cols, [{ a: "Eggs", b: 12, c: true }]);
-    const buf = ListExcel.toArrayBuffer(wb);
-    const wb2 = ListExcel.readWorkbook(buf);
+    // A sheet's cells as rows: formulas as "=…", empty cells as null, trailing empties dropped.
+    const grid = (wb, name) => {
+      const out = [];
+      wb.getWorksheet(name).eachRow((row, r) => {
+        const vals = [];
+        row.eachCell({ includeEmpty: true }, (cell, c) => { vals[c - 1] = cell.formula ? "=" + cell.formula : cell.value ?? null; });
+        while (vals.length && vals[vals.length - 1] == null) vals.pop();
+        out[r - 1] = Array.from(vals, (v) => v ?? null);
+      });
+      return out;
+    };
+    const roundTrip = async (wb) => ListExcel.readWorkbook(await ListExcel.toArrayBuffer(wb));
+
+    const wb2 = await roundTrip(await ListExcel.buildWorkbook("List", cols, [{ a: "Eggs", b: 12, c: true }]));
     const cols2 = [...cols, { id: "d", name: "Price", type: "number" }].map((c) => c.id === "a" ? { ...c, name: "item" } : c);
     const res = ListExcel.appendToWorkbook(wb2, "List", cols2, [{ a: "Milk", b: 2, c: false, d: 3.2 }]);
-    const aoa = XLSX.utils.sheet_to_json(ListExcel.readWorkbook(ListExcel.toArrayBuffer(wb2)).Sheets.List, { header: 1 });
+    const aoa = grid(await roundTrip(wb2), "List");
     const wantAoa = [["Item", "Qty", "Made", "Price"], ["Eggs", 12, "Yes"], ["Milk", 2, "No", 3.2]];
     log(eq(aoa, wantAoa), "append matches headers (ignoring case) and adds a new column", JSON.stringify(aoa));
     log(eq(res.newColumns, ["Price"]), "reports the new columns");
     ListExcel.appendToWorkbook(wb2, "Second list", cols, [{ a: "Tea", b: 1, c: true }]);
-    log(eq(wb2.SheetNames, ["List", "Second list"]), "a new tab is created");
+    log(eq(ListExcel.sheetNames(wb2), ["List", "Second list"]), "a new tab is created");
+
+    log(ListExcel.fillDown(`SUM($A$1:A3)*'My sheet'!B2+LOG10(C3)&"A1"`, 2) === `SUM($A$1:A5)*'My sheet'!B4+LOG10(C5)&"A1"`,
+      "formulas are filled down like Excel does ($ rows, sheet names, text and LOG10 left alone)");
+
+    {
+      // An existing sheet with Price, a Total sales formula, a Total row and some formatting
+      const src = new ExcelJS.Workbook();
+      const ws = src.addWorksheet("Daily");
+      ws.addRow(["Item", "Qty", "Price", "Total sales"]);
+      ws.addRow(["Bread", 10, 5, { formula: "B2*C2", result: 50 }]);
+      ws.addRow(["Cake", 2, 30, { formula: "B3*C3", result: 60 }]);
+      ws.addRow(["Total", null, null, { formula: "SUM(D2:D3)", result: 110 }]);
+      ws.getCell("A1").fill = { type: "pattern", pattern: "solid", fgColor: { argb: "FFCCE5CC" } };
+      for (const addr of ["C3", "D3"]) ws.getCell(addr).numFmt = '#,##0.00 "ብር"';
+      const wbF = await roundTrip(src);
+      const r = ListExcel.appendToWorkbook(wbF, "Daily",
+        [{ id: "i", name: "Item", type: "text", role: "item" }, { id: "q", name: "Qty", type: "number" }],
+        [{ i: "Bread", q: 7 }, { i: "Pie", q: 3 }]);
+      const back = await roundTrip(wbF);
+      const g = grid(back, "Daily");
+      const want = [["Item", "Qty", "Price", "Total sales"], ["Bread", 10, 5, "=B2*C2"], ["Cake", 2, 30, "=B3*C3"],
+        ["Bread", 7, 5, "=B4*C4"], ["Pie", 3, null, "=B5*C5"], ["Total", null, null, "=SUM(D2:D5)"]];
+      log(eq(g, want), "new rows: formulas filled down, price from the same item, placed above the Total row", JSON.stringify(g));
+      log(eq([r.aboveTotal, r.formulaColumns, r.filledColumns], [true, ["Total sales"], ["Price"]]), "reports what it did", JSON.stringify(r));
+      const w = back.getWorksheet("Daily");
+      log(w.getCell("C4").numFmt === '#,##0.00 "ብር"' && w.getCell("A1").fill?.fgColor?.argb === "FFCCE5CC",
+        "formatting is kept, and new rows get the row above's money format", JSON.stringify({ c4: w.getCell("C4").numFmt, a1: w.getCell("A1").fill }));
+    }
+
+    {
+      // A two-row header like the paper form: group headings merged across their columns
+      const src = new ExcelJS.Workbook();
+      const ws = src.addWorksheet("Form");
+      ws.getCell("A1").value = "No"; ws.mergeCells("A1:A2");
+      ws.getCell("B1").value = "Morning"; ws.mergeCells("B1:C1");
+      ws.getCell("B2").value = "Made"; ws.getCell("C2").value = "Sold";
+      ws.getCell("D1").value = "Price"; ws.mergeCells("D1:D2");
+      ws.addRow([1, 10, 8, 5]);
+      const wbH = await roundTrip(src);
+      const h = ListExcel.readHeaders(wbH, "Form");
+      log(eq(h.headers.map((x) => x.name), ["No", "Morning: Made", "Morning: Sold", "Price"]) && h.headerRow === 2,
+        "two-row header: columns are named like Morning: Made", JSON.stringify(h));
+      const r = ListExcel.appendToWorkbook(wbH, "Form",
+        [{ id: "n", name: "No", type: "number" }, { id: "m", name: "Morning : made", type: "number" }, { id: "s", name: "Morning: Sold", type: "number" }],
+        [{ n: 2, m: 12, s: 9 }]);
+      const g = grid(await roundTrip(wbH), "Form");
+      log(r.newColumns.length === 0 && eq(g[3], [2, 12, 9]), "two-row header: values go under the right columns, no extra columns", JSON.stringify({ r, row4: g[3] }));
+    }
+
+    {
+      // An equation column in a new file
+      const cols = [
+        { id: "i", name: "Item", type: "text", role: "item" }, { id: "q", name: "Qty", type: "number" }, { id: "p", name: "Price", type: "text" },
+        { id: "t", name: "Total sales", type: "calc", equation: "[Qty] × [Price]" }, { id: "u", name: "Per item", type: "calc", equation: "[Total sales] ÷ [Qty]" },
+      ];
+      const wbN = await roundTrip(await ListExcel.buildWorkbook("List", cols, [{ i: "Bread", q: 3, p: "5" }]));
+      const gN = grid(wbN, "List");
+      const wsN = wbN.getWorksheet("List");
+      log(eq(gN[1], ["Bread", 3, 5, "=B2*C2", '=IFERROR(D2/B2,"")']) && wsN.getCell("D2").value.result === 15,
+        "equation in a new file: real formulas with the value, numbers saved as numbers", JSON.stringify({ row: gN[1], result: wsN.getCell("D2").value }));
+
+      // Added to an existing file: a column new to the sheet, with data rows and a Total row
+      const src = new ExcelJS.Workbook();
+      const ws = src.addWorksheet("Daily");
+      ws.addRow(["Item", "Qty", "Price", "Tax"]);
+      ws.addRow(["Bread", 10, 5, 1]);
+      ws.addRow(["Cake", 2, 30, 2]);
+      ws.addRow(["Total", null, null, { formula: "SUM(D2:D3)", result: 3 }]);
+      ws.getCell("D4").font = { bold: true };
+      const wbE = await roundTrip(src);
+      const r = ListExcel.appendToWorkbook(wbE, "Daily",
+        [{ id: "i", name: "Item", type: "text", role: "item" }, { id: "q", name: "Qty", type: "number" }, { id: "p", name: "Price", type: "number" }, { id: "t", name: "Sales", type: "calc", equation: "[Qty] × [Price]" }],
+        [{ i: "Pie", q: 4, p: 7 }]);
+      const back = await roundTrip(wbE);
+      const g = grid(back, "Daily");
+      log(eq(g, [["Item", "Qty", "Price", "Tax", "Sales"], ["Bread", 10, 5, 1, "=B2*C2"], ["Cake", 2, 30, 2, "=B3*C3"], ["Pie", 4, 7, "=D2", "=B4*C4"], ["Total", null, null, "=SUM(D2:D4)", "=SUM(E2:E4)"]].map((row, i) => (i === 3 ? g[3] : row)))
+        && g[3][4] === "=B4*C4" && eq(r.newColumns, ["Sales"]) && back.getWorksheet("Daily").getCell("E5").font?.bold === true,
+        "equation in an existing file: new column worked out for old and new rows, with a SUM in the Total row", JSON.stringify({ g, r }));
+
+      // A Price column added by hand and left empty: filled from that item's earlier row, so the equation works
+      const pr = new ExcelJS.Workbook();
+      const pw = pr.addWorksheet("Daily");
+      pw.addRow(["Item", "Qty", "Price"]);
+      pw.addRow(["Bread", 10, 5]);
+      const wbP = await roundTrip(pr);
+      const rp = ListExcel.appendToWorkbook(wbP, "Daily",
+        [{ id: "i", name: "Item", type: "text", role: "item" }, { id: "q", name: "Qty", type: "number" }, { id: "p", name: "Price", type: "number", manual: true }, { id: "t", name: "Sales", type: "calc", equation: "[Qty] × [Price]" }],
+        [{ i: "Bread", q: 4, p: "" }]);
+      const gP = grid(await roundTrip(wbP), "Daily");
+      log(eq(gP[2], ["Bread", 4, 5, "=B3*C3"]) && eq(rp.filledColumns, ["Price"]), "an empty Price added by hand is filled from the same item's earlier row", JSON.stringify({ gP, rp }));
+
+      // The sheet already calculates that column itself: its own formula wins
+      const own = new ExcelJS.Workbook();
+      const ow = own.addWorksheet("Daily");
+      ow.addRow(["Item", "Qty", "Price", "Sales"]);
+      ow.addRow(["Bread", 10, 5, { formula: "B2*C2*2", result: 100 }]);
+      const wbO = await roundTrip(own);
+      ListExcel.appendToWorkbook(wbO, "Daily",
+        [{ id: "i", name: "Item", type: "text", role: "item" }, { id: "q", name: "Qty", type: "number" }, { id: "p", name: "Price", type: "number" }, { id: "t", name: "Sales", type: "calc", equation: "[Qty] × [Price]" }],
+        [{ i: "Pie", q: 4, p: 7 }]);
+      log(grid(await roundTrip(wbO), "Daily")[2][3] === "=B3*C3*2", "equation in an existing file: a formula the sheet already has wins");
+    }
+
+    const csv = await ListExcel.readWorkbook(new TextEncoder().encode("Item,Qty\nEggs,12\n").buffer);
+    log(eq(grid(csv, ListExcel.sheetNames(csv)[0]), [["Item", "Qty"], ["Eggs", 12]]), "a .csv file opens too");
 
     // --- OCR on samples ---
     for (const name of ["printed-list.png", "phone-photo-list.jpg"]) {

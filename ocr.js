@@ -5,10 +5,12 @@
   let progressCb = () => {};
   const MAX_SIDE = 4000; // px; bigger pictures get slow to read, especially on phones
   const THIN_LINE = 10;  // px; anything thicker is a filled band, not a grid line
+  const TESSERACT_URL = "https://cdn.jsdelivr.net/npm/tesseract.js@5.1.1/dist/tesseract.min.js";
 
   async function getWorker(lang) {
     if (worker && workerLang === lang) return worker;
     if (worker) await worker.terminate();
+    await loadScript(TESSERACT_URL); // only needed when the free reader is used
     worker = await Tesseract.createWorker(lang, 1, {
       logger: (m) => progressCb(m),
     });

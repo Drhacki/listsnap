@@ -3,8 +3,9 @@
 Take a photo of a list (item, quantity, price, morning/afternoon, made). ListSnap reads it and puts it in a table you can edit. You can then save it as a **new Excel file** or **add the rows to an Excel file you already have**. It works on phone and PC. When you sign in with Google, your files are kept in your Google Drive, so every device sees the same files.
 
 - **Free text reading (OCR)** with Tesseract. It runs on your own device, so photos aren't uploaded anywhere.
+- **Optional: read with Claude or Gemini** for printed forms, Amharic and handwriting. Much more accurate, but the photo is sent to that company (see below). Gemini works with a free key.
 - **Your own columns**: add, rename or delete columns and rows. Save column setups as templates (for example "Bakery morning list").
-- **Add to an existing file**: pick the file and the tab, or create a new tab for a new list. Rows go at the bottom, columns are matched by name, and missing columns are added on the right.
+- **Add to an existing file**: pick the file and the tab, or create a new tab for a new list. Columns are matched by name, missing columns are added on the right, and your file's formulas, prices, Total row and formatting keep working (see "Adding to an Excel file you already have").
 - **Works without an account**: files are downloaded to and opened from the device.
 
 ## Use it on this PC now
@@ -43,7 +44,9 @@ With **"Use the columns from the picture"** ticked (the default):
 - A line with just "Morning"/"ጠዋት" or "Afternoon"/"ከሰዓት በኋላ" fills a Time column. If the header has no Time column, one is added.
 - **Tables with lines** (a screenshot of Excel or Google Sheets, or a printed table with borders): the lines show where each cell is, so long text that wraps onto several lines inside a cell stays one row. The spreadsheet's A B C letters and 1 2 3 row numbers are left out.
 - **Small text** (screenshots, or a list photographed from far away) is read a second time at a bigger size, which takes a few seconds longer.
-- **Scanning another page into a table that already has rows** keeps your columns. The new picture's columns are matched by name (or meaning, e.g. ብዛት = Qty), and any new ones are added on the right. If the picture's header is completely different from your table, ListSnap asks whether to start a new table instead.
+- **Scanning another page of the same table** adds its rows underneath. Columns are matched by their exact names, and any new ones are added on the right.
+- **Scanning a picture whose header is different from the table on screen** starts a new table with the picture's own columns, so they're never renamed to Item, Qty and so on. The earlier rows are put aside, and the **Undo** button in the message brings them back.
+- A list **without** a header row gets ListSnap's own names (Item, Qty…). Those are matched by meaning too, so its Qty goes into a "ብዛት" column if your table has one.
 
 Untick it to always use your own columns or a saved template instead.
 
@@ -62,8 +65,54 @@ Untick it to always use your own columns or a saved template instead.
 - **Ethiopic numerals** (፲፪ = 12, ፪፻፶ = 250) are turned into ordinary numbers for Excel.
 - Amharic letters that look alike are sometimes swapped (for example ስኳር read as ስኪር), so check item names before saving.
 
+## Read with an AI: Claude or Gemini (optional, more accurate)
+The free reader does well on clear, printed lists. For forms with many columns and lines, Amharic, or handwriting, choose **Claude** or **Gemini** in the **Reader** menu under the Read list button.
+
+Both copy the picture's own columns. A two-row header becomes "Group: Sub" names, for example `ጠዋት የተሰራ: ያደረ`. They fill in handwritten numbers too. Check the table before saving. Reading takes up to a minute.
+
+| | Claude (Anthropic) | Gemini (Google) |
+|---|---|---|
+| Key | https://console.anthropic.com → Settings → API keys. Add a little credit (a few dollars lasts a long time). | https://aistudio.google.com/app/apikey → Get API key. A free key works. |
+| Cost per photo | About 2–10 US cents, depending on the table's size | **Free key:** nothing, but only about 20 requests a day per model (the limit found in November 2026), and each read or Proofread is one request. **Paid key:** about 1–3 US cents. |
+| Your photos | Sent to Anthropic. By default, API data isn't used to train its models. | Sent to Google. **With a free key, Google may use them to improve its products** (people may read them). Paid keys: not used. |
+| Model | Claude Opus 5.5. If a request is ever declined, it's retried on another Claude model. | Gemini 3.8 Flash. If it's busy or its daily allowance is used up, ListSnap switches to Gemini 3.6 Flash by itself. |
+
+- ListSnap asks for the key the first time you pick that reader. It's saved only on that phone or computer, so each device asks once. The **API key** button next to the menu changes or removes it.
+- **Never put a key in `config.js` or any file you upload.** Anyone could copy it from your website and use your credit. Everyone types their own key into the app.
+
+## Columns worked out with an equation
+Press **+ Column**, give it a name such as `Total sales`, and choose **Calculated (equation)** as the type. Tap the columns and signs to build the equation, for example:
+
+`([ጠዋት የተሰራ: ድምር] − [ጠዋት የተሰራ: የተበላሸ]) × [Price]`
+
+- You can also type it: `+ - * /` or `× ÷`, brackets, plain numbers and percentages (`[Price] × 15%`). The line under the buttons shows the result for the first row, or what's wrong.
+- **In the table** it recalculates as you edit. A blank cell counts as 0. A **?** means a cell holds words instead of a number; hold the pointer on it to see which.
+- **In Excel** it's saved as a real formula, so it keeps working when you change numbers there. A division by an empty cell stays empty instead of showing `#DIV/0!`.
+- **Adding to an existing file:** if the column is new to the sheet, it's also worked out for the rows already there, and a Total row gets a SUM for it (except for divisions, where adding up makes no sense). If the sheet already has a formula in that column, the sheet's formula is kept.
+- **It stays for the next scan.** After you clear the table and read another sheet, the equation column stays, along with columns you added by hand that it uses, like `Price`. It only goes away if the new picture has none of the columns it uses, which means it's a different form. A Price left empty is filled from that bread's last row when you add to an existing file. **Save as template** keeps equations too.
+- Renaming a column updates the equations that use it. A column that an equation uses can't be deleted until you change that equation.
+
+## Checking the table (fewer mistakes)
+No reader is perfect, so ListSnap points you at the cells most likely to be wrong. A bar above the table counts them, and **Next** jumps from one to the next.
+- 🟥 **Red: the row doesn't add up.** Where a table has a total column (`ያደረ + አዲስ የተመረተ = ድምር`, or `Qty × Price = Total`), ListSnap checks each row, for free and with any reader. It only uses a rule if most rows in the table follow it. A red row may be a misread number or a mistake on the paper itself.
+- 🟨 **Yellow: hard to read.** With Claude or Gemini, the AI marks cells it found smudged or unclear. Don't rely on it: in testing, Gemini misread many printed Amharic names without marking any of them.
+- 🟦 **Blue: suggested fix.** Press **🔍 Proofread with AI** under the table. The AI compares the table with the photo again and lists only what looks wrong, each with **Use** and **Keep** buttons. In testing with Gemini it caught all 7 planted number and name mistakes with no false alarms, but fixed only 3 of 21 misread Amharic names, so check names by eye. It counts as one more request, and it uses the AI chosen in the Reader menu, so switch the menu for a second opinion from the other AI.
+- **Show the photo while checking** pins the photo above the table, with + and − to zoom. The bread name column also stays in view when the table scrolls sideways.
+
+Changing a cell clears its mark.
+
+## Adding to an Excel file you already have
+Choose **Add to existing file**, open your file, and pick the tab. ListSnap adds the scanned rows and keeps the rest of the file working:
+- **Columns are matched by name.** A two-row header like the paper form (a heading such as `ጠዋት የተሰራ` merged over `ያደረ`, `ድምር`, …) counts as `ጠዋት የተሰራ: ድምር` and so on, the same names the AI readers give those columns. Columns the file doesn't have yet are added on the right.
+- **Formulas carry on.** If the row above has a formula, for example `Total sales = (morning total + afternoon total) × Price`, every new row gets the same formula for its own row, so Excel calculates it. If the sheet calculates a column, its formula wins over a number from the photo.
+- **Prices are filled in.** For columns the photo doesn't have, like Price, each new row takes the number from the last row with the same item (bread type). A new item gets an empty price; type it in once and the total appears.
+- **A Total row stays at the bottom.** New rows go above it, and its SUM is stretched to include them.
+- **Formatting is kept:** fonts, colours, the "ብር" money format, column widths and merged headings. New rows copy the look of the row above.
+- New rows are always added; ListSnap doesn't change the numbers in rows that are already there.
+
+ExcelJS (the Excel helper, about 1 MB) is downloaded the first time you open or save a file, and is kept for offline use after that.
+
 ## Good to know
-- When ListSnap adds rows to an existing file, it keeps the data and formulas, but **cell colors and fancy formatting may be lost** (a limit of the free Excel library). Keep a copy if the formatting matters.
 - "Made" is a Yes/No checkbox. Tap the column name to change it into text or anything else.
 
 ## Files
@@ -73,7 +122,9 @@ Untick it to always use your own columns or a saved template instead.
 | `app.js` | Table, scanning, templates and saving |
 | `parse.js` | Turns the scanned text into item / qty / price / time / made |
 | `ocr.js` | Image cleanup plus Tesseract text reading |
-| `excel.js` | Creating and adding to `.xlsx` files |
+| `ai.js` | The Claude and Gemini readers: send the photo and get the table back, or proofread a table |
+| `load.js` | Downloads the bigger helpers only when they're first needed, so the page opens quickly |
+| `excel.js` | Creating and adding to `.xlsx` files with ExcelJS: formulas, prices, Total row, two-row headers, formatting |
 | `drive.js` | Google sign-in and Google Drive storage |
 | `config.js` | Your Google Client ID |
 | `sw.js`, `manifest.json`, `icons/` | Install-as-app and offline support |

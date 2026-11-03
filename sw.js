@@ -1,8 +1,8 @@
 // Offline support. App files load from the network first so updates show up, with the cache as a fallback.
 // The OCR engine, language data and the Excel library are cached the first time they're used.
-const VERSION = "listsnap-v2";
+const VERSION = "listsnap-v7";
 const SHELL = [
-  "./", "index.html", "style.css", "config.js", "parse.js", "ocr.js", "excel.js", "drive.js", "app.js",
+  "./", "index.html", "style.css", "config.js", "load.js", "parse.js", "ocr.js", "ai.js", "excel.js", "drive.js", "app.js",
   "manifest.json", "icons/icon-192.png", "icons/icon-512.png",
 ];
 const CDN_HOSTS = ["cdnjs.cloudflare.com", "cdn.jsdelivr.net", "tessdata.projectnaptha.com", "unpkg.com"];
