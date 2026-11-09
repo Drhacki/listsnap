@@ -14,7 +14,9 @@
     { id: uid(), name: "Made", type: "check", role: "made" },
     { id: uid(), name: "Date", type: "date", role: "date" },
   ];
-  const TYPE_LABEL = { text: "text", number: "123", time: "AM/PM", check: "✓", date: "date", calc: "=" };
+  const TYPE_LABEL = { text: "text", number: "123", time: "AM/PM", check: "✓", date: "date", calc: "=", lookup: "list" };
+  // Columns that are worked out, not typed in or read from a photo.
+  const isWorkedOut = (col) => col.type === "calc" || col.type === "lookup";
 
   const state = {
     columns: DEFAULT_COLUMNS(),
@@ -74,7 +76,7 @@
       if (col.role === "item") th.className = "item-cell";
       const b = document.createElement("button");
       b.className = "colhead"; b.type = "button";
-      b.title = col.type === "calc" ? `= ${col.equation}` : "Edit column";
+      b.title = col.type === "calc" ? `= ${col.equation}` : col.type === "lookup" ? "Filled in from its price list" : "Edit column";
       b.textContent = col.name;
       const t = document.createElement("span");
       t.className = "type"; t.textContent = TYPE_LABEL[col.type] || "";
@@ -128,7 +130,7 @@
       saveDraft();
       refreshChecks();
     };
-    if (col.type === "calc") {
+    if (isWorkedOut(col)) {
       td.className = "calc-cell";
       td.appendChild(document.createElement("output")); // filled in by refreshChecks
       return td;
@@ -151,6 +153,12 @@
       el.value = v == null ? "" : v;
       el.oninput = () => { row[col.id] = col.type === "number" && el.value !== "" ? Number(el.value) : el.value; edited(); };
       if (col.role === "item") td.className = "item-cell";
+      // The item column offers the closest remembered names while it's being edited.
+      if (col === ListParser.itemColumnOf(state.columns)) {
+        el.addEventListener("focus", () => showSuggestions(el));
+        el.addEventListener("input", () => showSuggestions(el));
+        el.addEventListener("blur", () => { $("suggestBar").hidden = true; });
+      }
     }
     el.setAttribute("aria-label", col.name);
     td.appendChild(el);
@@ -165,9 +173,22 @@
     const sumCells = new Set(sums.map((s) => `${state.rows[s.row]._id}|${state.columns[s.col].id}`));
     const rowsById = new Map(state.rows.map((r) => [r._id, r]));
     const colsById = new Map(state.columns.map((c) => [c.id, c]));
-    let unsure = 0, fixes = 0, failedCalcs = 0;
+    let unsure = 0, fixes = 0, failedCalcs = 0, noPrice = 0, unknownNames = 0;
+    const item = ListParser.itemColumnOf(state.columns);
+    const known = namesOn() ? new Set(knownNames().map(ListParser.nameKey)) : null;
     for (const td of $("grid").tBodies[0].querySelectorAll("td[data-col]")) {
       const column = colsById.get(td.dataset.col);
+      if (column && column.type === "lookup") {
+        const row = rowsById.get(td.dataset.row);
+        const price = ListParser.lookupValue(column, state.columns, row);
+        // A row with an item but no matching name in the list is marked, so a missing price is noticed.
+        const missing = price === null && !!item && !!String(row?.[item.id] ?? "").trim();
+        td.firstChild.textContent = price === null ? "" : formatNumber(price);
+        td.classList.toggle("flag-noprice", missing);
+        td.title = missing ? `No price for “${String(row[item.id]).trim()}”. Add it to ${column.name}'s price list, or correct the name.` : "";
+        if (missing) noPrice++;
+        continue;
+      }
       if (column && column.type === "calc") {
         const result = ListParser.equationValue(column, state.columns, rowsById.get(td.dataset.row));
         // Dividing by an empty or zero cell is left empty, as it is in the Excel file: on a form with
@@ -190,6 +211,12 @@
         : flag === "unsure" ? "Hard to read: please compare with the photo" : "";
       if (flag === "unsure") unsure++;
       if (flag === "fix") fixes++;
+      // An item name that isn't on the remembered list is probably misread.
+      const name = item && td.dataset.col === item.id ? String(rowsById.get(td.dataset.row)?.[item.id] ?? "").trim() : "";
+      const unknown = !!known && !!name && !known.has(ListParser.nameKey(name));
+      td.classList.toggle("flag-unknown", unknown);
+      if (unknown && !td.title) td.title = "Not one of your remembered names: tap it to choose the closest one, or check it against the photo.";
+      if (unknown) unknownNames++;
     }
     const badRows = new Set(sums.map((s) => s.row)).size;
     const parts = [];
@@ -197,6 +224,8 @@
     if (fixes) parts.push(`🟦 ${fixes} suggested fix${fixes === 1 ? "" : "es"}`);
     if (failedCalcs) parts.push(`🟥 ${failedCalcs} can't be calculated`);
     if (unsure) parts.push(`🟨 ${unsure} hard to read`);
+    if (noPrice) parts.push(`🟨 ${noPrice} without a price`);
+    if (unknownNames) parts.push(`🟨 ${unknownNames} name${unknownNames === 1 ? "" : "s"} not on your list`);
     $("checkText").textContent = parts.join(" · ");
     $("checkBar").hidden = !parts.length;
 
@@ -206,6 +235,42 @@
   }
 
   const formatNumber = (n) => Number(n.toFixed(2)).toLocaleString("en-US", { maximumFractionDigits: 2 });
+
+  // For a name that isn't on the remembered list: its closest names, one tap to use one, or add it to the list.
+  // Shown in the bar above the table, which stays in view and isn't covered by a phone's keyboard.
+  function showSuggestions(input) {
+    const bar = $("suggestBar");
+    const value = input.value.replace(/\s+/g, " ").trim();
+    const known = knownNames();
+    if (!namesOn() || !value || known.some((n) => ListParser.nameKey(n) === ListParser.nameKey(value))) { bar.hidden = true; return; }
+    bar.replaceChildren();
+    const label = document.createElement("span");
+    label.textContent = `“${value}” isn't on your list. Change to:`;
+    bar.append(label);
+    const button = (text, ghost, run) => {
+      const b = document.createElement("button");
+      b.type = "button";
+      b.className = ghost ? "btn small ghost" : "btn small";
+      b.textContent = text;
+      b.addEventListener("pointerdown", (e) => e.preventDefault()); // keep the cell (and the keyboard) where it is
+      b.addEventListener("mousedown", (e) => e.preventDefault());
+      b.onclick = run;
+      bar.append(b);
+    };
+    for (const name of ListParser.closestNames(value, known, 3)) {
+      button(name, false, () => {
+        input.value = name;
+        input.dispatchEvent(new Event("input")); // saves it, clears its marks, refills the price
+        bar.hidden = true;
+      });
+    }
+    button(`+ Add “${value}” to my names`, true, () => {
+      saveKnownNames([...knownNames(), value]);
+      bar.hidden = true;
+      toast(`“${value}” is now one of your remembered names.`);
+    });
+    bar.hidden = false;
+  }
 
   function showCell(td) {
     state.checkAt = `${td.dataset.row}|${td.dataset.col}`;
@@ -223,7 +288,7 @@
   }
 
   $("checkNext").onclick = () => {
-    const cells = [...$("grid").tBodies[0].querySelectorAll("td.flag-unsure, td.flag-sum, td.flag-fix, td.flag-calc")];
+    const cells = [...$("grid").tBodies[0].querySelectorAll("td.flag-unsure, td.flag-sum, td.flag-fix, td.flag-calc, td.flag-noprice, td.flag-unknown")];
     if (!cells.length) return;
     const at = cells.findIndex((td) => `${td.dataset.row}|${td.dataset.col}` === state.checkAt);
     showCell(cells[(at + 1) % cells.length]);
@@ -244,7 +309,7 @@
     setZoom(1);
   }
 
-  const photoColumns = () => state.columns.filter((c) => c.type !== "calc");
+  const photoColumns = () => state.columns.filter((c) => !isWorkedOut(c));
 
   // Proofreading: an AI compares the table with the photo and lists only what looks wrong.
   const cellText = (row, col) => {
@@ -345,9 +410,11 @@
     $("colName").value = col ? col.name : "";
     $("colType").value = col ? col.type : "text";
     $("colEquation").value = col && col.equation ? col.equation : "";
+    $("colLookup").value = col && col.priceList ? col.priceList : "";
     $("colError").hidden = true;
     $("colDelete").hidden = !col;
     showEquationEditor();
+    showPriceListEditor();
     $("colDialog").returnValue = "";
     $("colDialog").showModal();
     $("colName").focus();
@@ -391,7 +458,52 @@
     const result = ListParser.equationValue({ equation: source }, state.columns, first);
     line.textContent = result.error ? `First row: ${result.error}` : `First row: ${formatNumber(result.value)}`;
   }
-  $("colType").onchange = showEquationEditor;
+  // The price-list editor: which column is matched, a button to list the table's names, and how many rows get a price.
+  function showPriceListEditor() {
+    const on = $("colType").value === "lookup";
+    $("lookupWrap").hidden = !on;
+    if (!on) return;
+    const item = ListParser.itemColumnOf(state.columns.filter((c) => c !== state.editingCol));
+    $("lookupHelp").textContent = item
+      ? `Each row gets the price of the name its “${item.name}” starts with. If two names fit, the longer one wins, so “ዳቦ ዱቄት 1 ኪሎ” beats “ዳቦ”.`
+      : "There's no item column to match the names against yet. Read a list first, or add a text column.";
+    updatePriceListPreview();
+  }
+  function updatePriceListPreview() {
+    const line = $("lookupPreview");
+    const list = ListParser.parsePriceList($("colLookup").value);
+    line.classList.toggle("err", !list.ok);
+    if (!list.ok) { line.textContent = list.error; return; }
+    const item = ListParser.itemColumnOf(state.columns.filter((c) => c !== state.editingCol));
+    const probe = { type: "lookup", priceList: $("colLookup").value };
+    const withItem = item ? state.rows.filter((r) => String(r[item.id] ?? "").trim()) : [];
+    const priced = withItem.filter((r) => ListParser.lookupValue(probe, state.columns, r) !== null).length;
+    const parts = [`${list.entries.length} price${list.entries.length === 1 ? "" : "s"}`];
+    if (list.unpriced.length) parts.push(`${list.unpriced.length} name${list.unpriced.length === 1 ? "" : "s"} still without a price`);
+    if (withItem.length) parts.push(`${priced} of ${withItem.length} rows in the table get a price`);
+    line.textContent = parts.join(" · ");
+  }
+  $("lookupFromTable").onclick = () => {
+    const item = ListParser.itemColumnOf(state.columns.filter((c) => c !== state.editingCol));
+    if (!item) return;
+    const box = $("colLookup");
+    const listed = (ListParser.parsePriceList(box.value).entries || []).map((e) => e.name)
+      .concat(ListParser.parsePriceList(box.value).unpriced || []).map(ListParser.nameKey);
+    const names = [];
+    for (const r of state.rows) {
+      const name = String(r[item.id] ?? "").trim();
+      if (name && !listed.includes(ListParser.nameKey(name)) && !names.some((n) => ListParser.nameKey(n) === ListParser.nameKey(name))) names.push(name);
+    }
+    if (!names.length) { updatePriceListPreview(); return; }
+    box.value = (box.value.trim() ? box.value.trimEnd() + "\n" : "") + names.map((n) => `${n} = `).join("\n");
+    box.focus();
+    // Put the cursor after the first new "=", ready to type its price.
+    const at = box.value.indexOf(`${names[0]} = `) + names[0].length + 3;
+    box.setSelectionRange(at, at);
+    updatePriceListPreview();
+  };
+  $("colLookup").oninput = updatePriceListPreview;
+  $("colType").onchange = () => { showEquationEditor(); showPriceListEditor(); };
   $("colEquation").oninput = updateEquationPreview;
   document.querySelectorAll("[data-eq]").forEach((b) => { b.onclick = () => insertInEquation(b.dataset.eq); });
 
@@ -404,9 +516,12 @@
     });
   }
 
-  // Check the column before the dialog closes, so a mistake can be fixed there.
+  // OK and Delete take effect the moment they're pressed. (Waiting for the dialog's "close" event instead would
+  // depend on when the browser gets round to sending it.) A mistake keeps the dialog open so it can be fixed.
   $("colDialog").querySelector("form").addEventListener("submit", (e) => {
-    if (e.submitter?.value !== "ok") return;
+    const action = e.submitter?.value;
+    if (action === "delete") { applyColumnDialog("delete"); return; }
+    if (action !== "ok") return;
     const self = state.editingCol;
     const name = $("colName").value.trim();
     let error = "";
@@ -415,16 +530,20 @@
     } else if ($("colType").value === "calc") {
       const check = ListParser.validateEquation($("colEquation").value, state.columns, self);
       if (!check.ok) error = check.error;
+    } else if ($("colType").value === "lookup") {
+      const list = ListParser.parsePriceList($("colLookup").value);
+      if (!list.ok) error = list.error;
+      else if (!ListParser.itemColumnOf(state.columns.filter((c) => c !== self))) error = "There's no item column to match the names against yet.";
     }
     $("colError").textContent = error;
     $("colError").hidden = !error;
     if (error) e.preventDefault();
+    else applyColumnDialog("ok");
   });
 
   const usesColumn = (c, name) => (ListParser.parseEquation(c.equation || "").refs || []).some((r) => ListParser.sameColumnName(r, name));
 
-  $("colDialog").addEventListener("close", () => {
-    const action = $("colDialog").returnValue;
+  function applyColumnDialog(action) {
     const col = state.editingCol;
     if (action === "delete" && col) {
       if (state.columns.length <= 1) { toast("A list needs at least one column."); return; }
@@ -436,8 +555,12 @@
       if (!name) return;
       const type = $("colType").value;
       const equation = type === "calc" ? ListParser.validateEquation($("colEquation").value, state.columns, col).text : undefined;
+      const priceList = type === "lookup" ? $("colLookup").value.trim() : undefined;
       if (col) {
-        if (col.type !== type && type !== "calc") for (const r of state.rows) r[col.id] = convert(r[col.id], type);
+        // Turning a price list into an ordinary column keeps its prices, so single rows can then be changed by hand.
+        if (col.type === "lookup" && type !== "lookup") for (const r of state.rows) r[col.id] = ListParser.lookupValue(col, state.columns, r) ?? "";
+        if (col.type !== type && !["calc", "lookup"].includes(type)) for (const r of state.rows) r[col.id] = convert(r[col.id], type);
+        if (priceList !== undefined) col.priceList = priceList; else delete col.priceList;
         // Equations follow a column that gets renamed.
         if (col.name !== name) {
           for (const c of state.columns) if (c.type === "calc" && c.equation) c.equation = c.equation.split(`[${col.name}]`).join(`[${name}]`);
@@ -447,12 +570,13 @@
       } else {
         const c = { id: uid(), name, type, manual: true }; // added by hand, not read from a photo
         if (equation) c.equation = equation;
+        if (priceList !== undefined) c.priceList = priceList;
         state.columns.push(c);
         for (const r of state.rows) r[c.id] = type === "check" ? false : type === "date" ? today() : "";
       }
     } else return;
     saveDraft(); renderGrid();
-  });
+  }
 
   function convert(v, type) {
     if (type === "check") return v === true || /^(yes|true|1|x|✓)$/i.test(String(v || ""));
@@ -667,13 +791,13 @@
     $("rawWrap").hidden = true;
     try {
       if ($("imageColumns").checked) {
-        const { columns, rows, unsure } = await ListAI.readTable(ai, state.image, aiKey(ai), null, { onRows, onNote });
+        const { columns, rows, unsure } = await ListAI.readTable(ai, state.image, aiKey(ai), null, { onRows, onNote, knownNames: namesOn() ? knownNames() : [] });
         const result = ListParser.fromTable(columns, rows);
         if (result.rows.length) addImageRows({ ...result, unsure });
         return result.rows.length;
       }
       const cols = photoColumns();
-      const { rows, unsure } = await ListAI.readTable(ai, state.image, aiKey(ai), cols.map((c) => c.name), { onRows, onNote });
+      const { rows, unsure } = await ListAI.readTable(ai, state.image, aiKey(ai), cols.map((c) => c.name), { onRows, onNote, knownNames: namesOn() ? knownNames() : [] });
       rows.forEach((values, i) => {
         const r = blankRow();
         r._scan = state.scan.id;
@@ -715,6 +839,12 @@
       const have = target.map((c) => c.name);
       const added = (name) => state.columns.find((o) => o.manual && o.type !== "calc" && sameName(o.name, name));
       const kept = [];
+      // A price list stays too, whenever the new picture has item names to match.
+      if (ListParser.itemColumnOf(target)) {
+        for (const c of state.columns) {
+          if (c.type === "lookup" && !have.some((n) => sameName(n, c.name))) { kept.push(c); have.push(c.name); }
+        }
+      }
       for (const c of state.columns) {
         if (c.type !== "calc" || have.some((n) => sameName(n, c.name))) continue;
         const refs = ListParser.parseEquation(c.equation || "").refs || [];
@@ -807,7 +937,7 @@
   $("saveTemplateBtn").onclick = async () => {
     const name = prompt("Name for this list template (for example “Bakery morning list”):");
     if (!name || !name.trim()) return;
-    const cols = state.columns.map(({ name, type, role, equation, manual }) => ({ name, type, role, equation, manual }));
+    const cols = state.columns.map(({ name, type, role, equation, manual, priceList }) => ({ name, type, role, equation, manual, priceList }));
     const existing = state.templates.findIndex((t) => t.name.toLowerCase() === name.trim().toLowerCase());
     if (existing >= 0) state.templates[existing].columns = cols;
     else state.templates.push({ name: name.trim(), columns: cols });
@@ -996,7 +1126,7 @@
       await ListExcel.download(wb, fileName);
       status(`Downloaded “${fileName}” (${rows.length} rows).` + (Drive.configured() ? " Sign in to keep files in sync across your devices." : ""), "ok");
     }
-    afterSave();
+    afterSave(rows);
   }
 
   async function saveExisting(rows) {
@@ -1036,7 +1166,7 @@
     renderSheetSelect();
     $("sheetSelect").value = sheet;
     updateExistingInfo();
-    afterSave();
+    afterSave(rows);
   }
 
   // What else happened while adding the rows, for the message after saving.
@@ -1050,11 +1180,85 @@
     return notes.length ? `. ${notes.join(". ")}` : "";
   }
 
-  function afterSave() {
+  function afterSave(rows) {
     setTimeout(() => {
       if (confirm("Saved. Clear the table so it's ready for the next list?")) { state.rows = []; saveDraft(); renderGrid(); }
+      offerToRemember(rows); // after the question, so the offer isn't hidden behind it
     }, 50);
   }
+
+  // ---------- remembered names ----------
+  // Item names the person has checked. Claude and Gemini are told them (it took misread names from 21 to none in
+  // testing), and names in the table that aren't on the list are marked. Names are only added with the person's
+  // OK, because the AI copies the list's spelling even over the photo.
+  const knownNames = () => ls.get("listsnap.knownNames", []);
+  const namesOn = () => $("useNames").checked && knownNames().length > 0;
+  function showNames() {
+    const n = knownNames().length;
+    $("useNames").hidden = !n;
+    $("namesLabel").textContent = n ? `Use my ${n} remembered name${n === 1 ? "" : "s"}` : "No remembered names yet";
+    $("namesBtn").textContent = n ? "Edit names" : "Add names";
+  }
+  function saveKnownNames(names) {
+    const seen = new Set();
+    const clean = names.map((n) => String(n).replace(/\s+/g, " ").trim()).filter((n) => {
+      const key = ListParser.nameKey(n);
+      if (!n || seen.has(key)) return false;
+      seen.add(key);
+      return true;
+    });
+    ls.set("listsnap.knownNames", clean);
+    showNames();
+    refreshChecks();
+  }
+  // Item names in these rows that aren't remembered yet, in table order.
+  function newNamesIn(rows) {
+    const item = ListParser.itemColumnOf(state.columns);
+    if (!item) return [];
+    const known = new Set(knownNames().map(ListParser.nameKey));
+    const fresh = [];
+    for (const r of rows) {
+      const name = String(r[item.id] ?? "").replace(/\s+/g, " ").trim();
+      const key = ListParser.nameKey(name);
+      if (name && !known.has(key)) { known.add(key); fresh.push(name); }
+    }
+    return fresh;
+  }
+  function offerToRemember(rows) {
+    if (knownNames().length && !$("useNames").checked) return; // names are switched off for this kind of list
+    const fresh = newNamesIn(rows);
+    if (!fresh.length) return;
+    const what = fresh.length === 1 ? `“${fresh[0]}”` : `these ${fresh.length} names`;
+    toast(`Remember ${what} for next time? Claude and Gemini read names better when they know them.`, 20000, {
+      label: "Remember",
+      run: () => { saveKnownNames([...knownNames(), ...fresh]); toast(`Remembered. ${knownNames().length} names in all; “Edit names” shows them.`); },
+    });
+  }
+
+  function updateNamesCount() {
+    const n = $("namesList").value.split(/\r?\n/).filter((l) => l.trim()).length;
+    $("namesCount").textContent = `${n} name${n === 1 ? "" : "s"}`;
+  }
+  $("namesBtn").onclick = () => {
+    $("namesList").value = knownNames().join("\n");
+    updateNamesCount();
+    $("namesDialog").showModal();
+  };
+  $("namesList").oninput = updateNamesCount;
+  $("namesFromTable").onclick = () => {
+    const box = $("namesList");
+    const listed = new Set(box.value.split(/\r?\n/).map(ListParser.nameKey).filter(Boolean));
+    const fresh = newNamesIn(state.rows).filter((n) => !listed.has(ListParser.nameKey(n)));
+    if (fresh.length) box.value = (box.value.trim() ? box.value.trimEnd() + "\n" : "") + fresh.join("\n");
+    updateNamesCount();
+  };
+  // Saved the moment Save is pressed (not on the dialog's "close" event, which can come late).
+  $("namesDialog").querySelector("form").addEventListener("submit", (e) => {
+    if (e.submitter?.value === "ok") saveKnownNames($("namesList").value.split(/\r?\n/));
+  });
+  $("useNames").checked = ls.get("listsnap.useNames", true);
+  $("useNames").onchange = () => { ls.set("listsnap.useNames", $("useNames").checked); refreshChecks(); };
+  showNames();
 
   // ---------- account ----------
   function renderAccount({ signedIn, user }) {

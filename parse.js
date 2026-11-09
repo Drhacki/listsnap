@@ -578,6 +578,7 @@
         if (result.error) throw new Error(result.error);
         return result.value;
       }
+      if (other.type === "lookup") return lookupValue(other, columns, row) ?? 0; // no price yet counts as 0
       const v = row[other.id];
       if (isBlank(v)) return 0;
       const n = asNumber(v);
@@ -628,6 +629,84 @@
       return level < outer || (rightSide && level === outer) ? `(${body})` : body;
     };
     return show(tree);
+  }
+
+  // ---------- Price lists: a column filled in from the row's item name ----------
+  // One line per item, "ባለ 10 = 10". A row gets the price of the longest name its item starts with, as a whole word,
+  // so "ዳቦ ዱቄት 1 ኪሎ" beats "ዳቦ", and "ባለ 1" doesn't catch "ባለ 10". A tab (pasted from Excel) works instead of =.
+  const nameKey = (s) => String(s ?? "").replace(/\s+/g, " ").trim().toLowerCase();
+
+  // Returns { ok: true, entries: [{ name, price }], unpriced: [names] } or { ok: false, error }.
+  function parsePriceList(text) {
+    const entries = [], unpriced = [];
+    const lines = String(text || "").split(/\r?\n/);
+    for (let n = 0; n < lines.length; n++) {
+      const line = lines[n].trim();
+      if (!line) continue;
+      const at = Math.max(line.lastIndexOf("="), line.lastIndexOf("\t"));
+      const name = (at < 0 ? line : line.slice(0, at)).trim();
+      const priceText = at < 0 ? "" : line.slice(at + 1).trim();
+      if (!name) return { ok: false, error: `Line ${n + 1} has a price but no name.` };
+      if (!priceText) { unpriced.push(name); continue; }
+      const price = asNumber(normalize(priceText).replace(/[,\s]|ብር|birr|br\.?$/gi, ""));
+      if (price === null) return { ok: false, error: `Line ${n + 1}: “${priceText}” isn't a number.` };
+      entries.push({ name, price });
+    }
+    return { ok: true, entries, unpriced };
+  }
+
+  // The column whose text is matched: the item column, or else the first text column.
+  const itemColumnOf = (columns) => columns.find((c) => c.role === "item") || columns.find((c) => c.type === "text");
+
+  // The price for one row (row: values by column id), or null when no name in the list matches.
+  function lookupValue(col, columns, row) {
+    const item = itemColumnOf(columns);
+    if (!item || !row) return null;
+    const text = nameKey(row[item.id]);
+    if (!text) return null;
+    let best = null;
+    for (const e of parsePriceList(col.priceList).entries || []) {
+      const key = nameKey(e.name);
+      const fits = text === key || (text.startsWith(key) && /^[\s,.:;()\-–/]/.test(text.slice(key.length)));
+      if (fits && (!best || key.length > best.key.length)) best = { key, price: e.price };
+    }
+    return best ? best.price : null;
+  }
+
+  // ---------- Closest names: suggestions for a name that isn't on the remembered list ----------
+  // How different two names are (edits needed to turn one into the other). Ethiopic letters come in rows of
+  // eight that share a consonant (ዳ ዱ ዲ ዴ ዶ …), and misreads often swap just the vowel, so that counts as half.
+  const consonantOf = (ch) => {
+    const code = ch.codePointAt(0);
+    return code >= 0x1200 && code <= 0x137f ? (code - 0x1200) >> 3 : null;
+  };
+  function nameDistance(a, b) {
+    const x = Array.from(a), y = Array.from(b);
+    let prev = Array.from({ length: y.length + 1 }, (_, j) => j);
+    for (let i = 1; i <= x.length; i++) {
+      const cur = [i];
+      for (let j = 1; j <= y.length; j++) {
+        const same = x[i - 1] === y[j - 1];
+        const cx = consonantOf(x[i - 1]);
+        const swap = same ? 0 : cx !== null && cx === consonantOf(y[j - 1]) ? 0.5 : 1;
+        cur[j] = Math.min(prev[j] + 1, cur[j - 1] + 1, prev[j - 1] + swap);
+      }
+      prev = cur;
+    }
+    return prev[y.length];
+  }
+
+  // The `count` names from `names` closest to `text`, closest first.
+  function closestNames(text, names, count = 3) {
+    const t = nameKey(text);
+    return names
+      .map((name, i) => {
+        const n = nameKey(name);
+        return { name, i, d: nameDistance(t, n) / Math.max(1, Array.from(t).length, Array.from(n).length) };
+      })
+      .sort((a, b) => a.d - b.d || a.i - b.i)
+      .slice(0, count)
+      .map((x) => x.name);
   }
 
   // ---------- Do the numbers add up? ----------
@@ -687,5 +766,6 @@
   global.ListParser = {
     parseListText, parseLine, toNumber, analyze, fromTable, checkNumbers,
     parseEquation, evalEquation, equationValue, validateEquation, equationToExcel, sameColumnName, DIVIDES_BY_ZERO,
+    parsePriceList, lookupValue, itemColumnOf, nameKey, closestNames,
   };
 })(typeof window !== "undefined" ? window : globalThis);

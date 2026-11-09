@@ -92,6 +92,34 @@ Press **+ Column**, give it a name such as `Total sales`, and choose **Calculate
 - **It stays for the next scan.** After you clear the table and read another sheet, the equation column stays, along with columns you added by hand that it uses, like `Price`. It only goes away if the new picture has none of the columns it uses, which means it's a different form. A Price left empty is filled from that bread's last row when you add to an existing file. **Save as template** keeps equations too.
 - Renaming a column updates the equations that use it. A column that an equation uses can't be deleted until you change that equation.
 
+## Remembered names (fewer misread names)
+Claude and Gemini misread many printed Amharic names: in a test on the bakery form, Gemini got 21 of 38 wrong (ፒታ became "ፒዛ", ሳንቡሳ became "ሳንድዊች"). Telling it the right names took that to **none**, at the same speed.
+- **After you save,** ListSnap offers to **Remember** the names in the table. Correct any misread names before saving, because the list is what Claude and Gemini will copy.
+- **Next time,** the names are given to Claude or Gemini while reading. Any name in the table that isn't on your list is marked 🟨 "not on your list", with every reader, so a misread name stands out.
+- **Tap a 🟨 name** (or press **Next**) and the bar above the table offers the 3 closest names from your list: tap one to use it, and its price fills in if you have a price list. **+ Add “…” to my names** is there for a bread that's really new. The choices follow what you type. Amharic letters that differ only in their vowel (ዳ/ዶ) count as close, because that's the most common misread: on the real misreads from testing, the right name came first 55 times out of 57.
+- **"Use my … remembered names"** under the Reader menu turns this off, for when you scan a different kind of list.
+- **Edit names** shows the list, one name per line, in the form's order. Fix or delete names there, or add the table's names with **+ Add the names in the table**.
+- **Keep it correct.** The AI follows the list even over the photo: in testing, a wrong name on the list was copied instead of what the photo said. If a printed name on your form changes, change it here too.
+- The list is saved on each device separately.
+
+## A Price column that fills itself in
+Press **+ Column**, name it `Price`, and choose **Price list (filled in by name)** as the type. Write one line per item:
+
+```
+ባለ 10 = 10
+ብስኩት = 45
+ዳቦ ዱቄት 1 ኪሎ = 95
+```
+
+- **+ Add the names in the table** writes every bread name in the table into the list, so you only type the prices.
+- Each row gets the price of the name its bread type (the item column) **starts with**, as a whole word. If two names fit, the longer one wins: `ዳቦ ዱቄት 1 ኪሎ` gets 95 even if there's also a `ዳቦ` line, and `ዳቦ` alone covers every other name starting with ዳቦ.
+- A row with no matching name is marked 🟨 "without a price". Usually that means a misread name: correct it in the table and the price appears. Or add the name to the list.
+- Prices like `95 ብር` or `1,200.50` are fine, and so is a list pasted from Excel (name and price in two columns).
+- **Equations can use it**, for example `([ጠዋት የተሰራ: ድምር] + [ከሰዓት የተሰራ: ድምር]) × [Price]`. A row without a price counts as 0.
+- **It stays for the next scan**, and **Save as template** keeps the list. Edit the column to change a price.
+- **In Excel** the prices are saved as plain numbers. Adding to an existing file that has no Price column yet also fills in prices for the rows already there, matched by their names.
+- To change one row's price by hand, edit the column and switch its type to **Number**: the prices stay in the cells and become editable (they stop following the list).
+
 ## Checking the table (fewer mistakes)
 No reader is perfect, so ListSnap points you at the cells most likely to be wrong. A bar above the table counts them, and **Next** jumps from one to the next.
 - 🟥 **Red: the row doesn't add up.** Where a table has a total column (`ያደረ + አዲስ የተመረተ = ድምር`, or `Qty × Price = Total`), ListSnap checks each row, for free and with any reader. It only uses a rule if most rows in the table follow it. A red row may be a misread number or a mistake on the paper itself.

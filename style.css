@@ -141,7 +141,8 @@ td.flag-fix { background: var(--flag-fix); }
 /* A calculated column: worked out from other columns, so it isn't typed into. */
 td.calc-cell output { display: block; min-width: 70px; min-height: 36px; line-height: 36px; padding: 0 10px; font-weight: 600; white-space: nowrap; }
 td.flag-calc { background: var(--flag-sum); }
-#colEquation {
+td.flag-noprice, td.flag-unknown, td.item-cell.flag-unknown { background: var(--flag-unsure); }
+#colEquation, #colLookup, #namesList {
   width: 100%; resize: vertical; padding: 8px 10px; font: inherit; font-weight: 400; color: var(--text);
   background: var(--input); border: 1px solid var(--border); border-radius: 8px;
 }
@@ -160,6 +161,13 @@ dialog { max-height: calc(100vh - 32px); overflow-y: auto; }
   margin-top: 6px; padding: 4px 10px; border: 1px solid var(--border); border-radius: 10px; background: var(--row-alt); font-size: .85rem;
 }
 .check-bar .btn { flex: none; }
+/* Closest remembered names for the name being edited. */
+.suggest-bar {
+  display: flex; align-items: center; gap: 6px; flex-wrap: wrap;
+  margin-top: 6px; padding: 6px 10px; border-radius: 10px; background: var(--flag-unsure); font-size: .85rem;
+}
+.suggest-bar .btn { font-weight: 600; }
+.suggest-bar .btn.ghost { font-weight: 400; }
 .photo-pane { margin: 0; }
 .photo-pane summary { cursor: pointer; font-weight: 600; }
 .photo-wrap { position: relative; margin-top: 6px; }

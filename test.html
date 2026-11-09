@@ -139,6 +139,23 @@
       log(!ListParser.validateEquation("[Total] × 2", cols, cols[1]).ok, "equation: a circle is refused when setting it up");
     }
 
+    // --- price lists: filled in from the item name ---
+    {
+      const list = ListParser.parsePriceList("ባለ 10 = 10\nዳቦ = 20\nዳቦ ዱቄት 1 ኪሎ = 95 ብር\nብስኩት\t45\nሚኒ ዶናት = 1,200.50\nፒታ =\n\n");
+      log(list.ok && list.entries.length === 5 && list.entries[2].price === 95 && list.entries[3].price === 45 && list.entries[4].price === 1200.5 && eq(list.unpriced, ["ፒታ"]),
+        "price list: = or a tab, ብር and commas, and names still without a price", JSON.stringify(list));
+      log(!ListParser.parsePriceList("ዳቦ = ten").ok && !ListParser.parsePriceList("= 5").ok, "price list: a price that isn't a number is refused");
+      const cols = [{ id: "n", name: "ተ.ቁ", type: "number" }, { id: "i", name: "የዳቦ አይነት", type: "text", role: "item" },
+        { id: "p", name: "Price", type: "lookup", priceList: "ባለ 1 = 1\nባለ 10 = 10\nዳቦ = 20\nዳቦ ዱቄት 1 ኪሎ = 95\nብስኩት = 45" }];
+      const price = (name) => ListParser.lookupValue(cols[2], cols, { i: name });
+      log(price("ባለ 10") === 10 && price("ባለ 1") === 1 && price("ዳቦ ዱቄት 1 ኪሎ") === 95 && price("ዳቦ ቆሎ") === 20 && price("ብስኩት 45") === 45 && price("  ብስኩት   45 ") === 45,
+        "price list: whole-word start of the name, the longest name wins", JSON.stringify(["ባለ 10", "ባለ 1", "ዳቦ ዱቄት 1 ኪሎ", "ዳቦ ቆሎ", "ብስኩት 45"].map(price)));
+      log(price("ፒዛ") === null && price("ዳቦዎች") === null && price("") === null, "price list: no match gives no price (and ዳቦ doesn't catch ዳቦዎች)");
+      const withSales = [...cols, { id: "q", name: "ድምር", type: "number" }, { id: "t", name: "Sales", type: "calc", equation: "[ድምር] × [Price]" }];
+      log(ListParser.equationValue(withSales[4], withSales, { i: "ባለ 10", q: 7 }).value === 70 && ListParser.equationValue(withSales[4], withSales, { i: "ፒዛ", q: 7 }).value === 0,
+        "price list: equations can use it (no price counts as 0)");
+    }
+
     // --- do the numbers add up? ---
     const named = (...names) => names.map((name) => ({ name }));
     let flags = ListParser.checkNumbers(named("ዳቦ", "ጠዋት: ያደረ", "ጠዋት: አዲስ", "ጠዋት: ድምር", "ጠዋት: የተበላሸ"), [
@@ -204,6 +221,38 @@
 
       window.fetch = realFetch;
       if (savedLimits) localStorage.setItem(LIMITS, savedLimits); else localStorage.removeItem(LIMITS);
+    }
+
+    // --- closest remembered names, for a misread name ---
+    {
+      const names = ["ባለ 10", "ባለ 25", "ብስኩት 45", "ቦቦሊኖ 55", "ሚኒ ዶናት 90", "ዶናት 75", "ሳንቡሳ", "ዳቦ ዱቄት 1 ኪሎ", "ዳቦ ቆሎ", "ግሪሲኒ", "ፈጢራ", "ፒታ"];
+      // misreads Gemini really made in testing, and the right names
+      const real = [["ፒዛ", "ፒታ"], ["ዳናት 75", "ዶናት 75"], ["ሚኒ እናት 90", "ሚኒ ዶናት 90"], ["ብስክሌት 45", "ብስኩት 45"], ["ቦሊሊያ 55", "ቦቦሊኖ 55"], ["ዱቦ ቆሎ", "ዳቦ ቆሎ"], ["ሳንዱሳ", "ሳንቡሳ"], ["ግሬስሊን", "ግሪሲኒ"]];
+      const firsts = real.map(([read]) => ListParser.closestNames(read, names, 3)[0]);
+      log(eq(firsts, real.map(([, right]) => right)), "closest name: real misreads get the right name first", JSON.stringify(firsts));
+      log(ListParser.closestNames("ባለ 7O", names, 3)[0] === "ባለ 10" && ListParser.closestNames("x", [], 3).length === 0 && ListParser.closestNames("ፒታ", names, 2).length === 2,
+        "closest name: at most the number asked for, nothing from an empty list");
+    }
+
+    // --- remembered names go to the AI (stand-in reply, nothing is sent) ---
+    {
+      const photo = new File([await (await fetch("samples/printed-list.png")).blob()], "p.png", { type: "image/png" });
+      const realFetch = window.fetch;
+      let prompt = "";
+      window.fetch = async (input, init) => {
+        const url = typeof input === "string" ? input : input.url;
+        if (!url.includes("generativelanguage")) return realFetch(input, init);
+        prompt = JSON.parse(init.body).contents[0].parts[1].text;
+        return new Response(new TextEncoder().encode("data: " + JSON.stringify({ candidates: [{ finishReason: "STOP", content: { parts: [{ text: '{"columns":["a"],"rows":[["1"]],"unsure":[]}' }] } }] }) + "\n\n"), { status: 200 });
+      };
+      const savedLimits = localStorage.getItem("listsnap.geminiLimits");
+      localStorage.removeItem("listsnap.geminiLimits");
+      await ListAI.readTable("gemini", photo, "test-key", null, { knownNames: ["ባለ 10", "ፒታ"] });
+      const withNames = prompt;
+      await ListAI.readTable("gemini", photo, "test-key", null, {});
+      window.fetch = realFetch;
+      if (savedLimits) localStorage.setItem("listsnap.geminiLimits", savedLimits);
+      log(withNames.includes("usually these, in this order: ባለ 10; ፒታ.") && !prompt.includes("usually these"), "remembered names are given to the AI, and only when there are some");
     }
 
     // --- a table read by Claude (cells already known) ---
@@ -332,6 +381,21 @@
         [{ i: "Bread", q: 4, p: "" }]);
       const gP = grid(await roundTrip(wbP), "Daily");
       log(eq(gP[2], ["Bread", 4, 5, "=B3*C3"]) && eq(rp.filledColumns, ["Price"]), "an empty Price added by hand is filled from the same item's earlier row", JSON.stringify({ gP, rp }));
+
+      // A price list in Excel: a new file gets the numbers; an existing sheet without a Price column gets one,
+      // filled for its old rows too, and Sales uses it
+      const plCols = [{ id: "i", name: "Item", type: "text", role: "item" }, { id: "q", name: "Qty", type: "number" },
+        { id: "p", name: "Price", type: "lookup", manual: true, priceList: "Bread = 5\nCake = 30" }, { id: "t", name: "Sales", type: "calc", manual: true, equation: "[Qty] × [Price]" }];
+      const gL = grid(await roundTrip(await ListExcel.buildWorkbook("List", plCols, [{ i: "Bread", q: 3 }, { i: "Pie", q: 1 }])), "List");
+      log(eq(gL.slice(1), [["Bread", 3, 5, "=B2*C2"], ["Pie", 1, null, "=B3*C3"]]), "price list in a new file: prices saved as numbers, none where there's no match", JSON.stringify(gL));
+      const ex = new ExcelJS.Workbook();
+      const exs = ex.addWorksheet("Daily");
+      exs.addRow(["Item", "Qty"]); exs.addRow(["Cake", 2]); exs.addRow(["Bread", 10]);
+      const wbL = await roundTrip(ex);
+      const rl = ListExcel.appendToWorkbook(wbL, "Daily", plCols, [{ i: "Bread", q: 4 }]);
+      const gE = grid(await roundTrip(wbL), "Daily");
+      log(eq(gE, [["Item", "Qty", "Price", "Sales"], ["Cake", 2, 30, "=B2*C2"], ["Bread", 10, 5, "=B3*C3"], ["Bread", 4, 5, "=B4*C4"]]) && eq(rl.newColumns, ["Price", "Sales"]),
+        "price list in an existing file: a new Price column is filled for old rows too", JSON.stringify({ gE, rl }));
 
       // The sheet already calculates that column itself: its own formula wins
       const own = new ExcelJS.Workbook();

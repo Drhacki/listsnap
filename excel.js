@@ -200,6 +200,7 @@
     rows.forEach((row, i) => {
       ws.addRow(columns.map((c) => {
         if (c.type === "calc") return equationCell(c, columns, row, lettersOf, i + 2);
+        if (c.type === "lookup") return ListParser.lookupValue(c, columns, row);
         const v = valueToWrite(c, row[c.id], used);
         return v === "" ? null : v;
       }));
@@ -287,6 +288,20 @@
       const k = columns.findIndex((c) => ListParser.sameColumnName(c.name, colName));
       return k < 0 ? null : colLetters(colIndex[k]);
     };
+    // A price list that's new to this sheet also fills in the rows already there, matched by their item names.
+    const item = ListParser.itemColumnOf(columns);
+    const itemAt = item ? colIndex[columns.indexOf(item)] : 0;
+    columns.forEach((c, k) => {
+      if (c.type !== "lookup" || !report.newColumns.includes(c.name) || !itemAt) return;
+      for (let r = headerRow + 1; r <= lastData; r++) {
+        const price = ListParser.lookupValue(c, columns, { [item.id]: textOf(ws.getCell(r, itemAt)) });
+        if (price === null) continue;
+        const cell = ws.getCell(r, colIndex[k]);
+        cell.style = copyStyle(ws.getCell(r, colIndex[k] - 1).style);
+        cell.value = price;
+      }
+    });
+
     // A calculated column that's new to this sheet is also worked out for the rows already there.
     const newCalc = columns.map((c, k) => ({ c, at: colIndex[k] })).filter(({ c }) => c.type === "calc" && report.newColumns.includes(c.name));
     for (const { c, at } of newCalc) {
@@ -316,7 +331,9 @@
         if (hasData) cell.style = copyStyle(ws.getCell(lastData, c).style);
         const k = colIndex.indexOf(c);
         const isCalc = k >= 0 && columns[k].type === "calc";
-        const v = k >= 0 && !isCalc ? valueToWrite(columns[k], row[columns[k].id], used) : "";
+        const v = k < 0 || isCalc ? ""
+          : columns[k].type === "lookup" ? ListParser.lookupValue(columns[k], columns, row) ?? ""
+          : valueToWrite(columns[k], row[columns[k].id], used);
         if (formulaFrom[c]) {
           // The sheet calculates this column, so its formula wins over a value from the photo or an equation here.
           cell.value = { formula: fillDown(ws.getCell(formulaFrom[c], c).formula, r - formulaFrom[c]) };

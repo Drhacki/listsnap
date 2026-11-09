@@ -68,6 +68,10 @@
         <button id="aiKeyBtn" type="button" class="btn small ghost" hidden>API key</button>
       </div>
       <p id="readerNote" class="muted small note"></p>
+      <div class="row wrap">
+        <label class="inline"><input id="useNames" type="checkbox"> <span id="namesLabel">No remembered names yet</span></label>
+        <button id="namesBtn" type="button" class="btn small ghost">Add names</button>
+      </div>
       <div id="progressWrap" class="progress" hidden><div id="progressBar"></div><span id="progressText"></span></div>
       <details id="rawWrap" hidden><summary>Text the scanner read</summary><pre id="rawText"></pre></details>
     </section>
@@ -97,6 +101,7 @@
           <span id="checkText"></span>
           <button id="checkNext" type="button" class="btn small">Next ›</button>
         </div>
+        <div id="suggestBar" class="suggest-bar" hidden></div>
       </div>
       <div class="table-wrap">
         <table id="grid"><thead></thead><tbody></tbody></table>
@@ -166,8 +171,17 @@
           <option value="check">Yes / No checkbox</option>
           <option value="date">Date</option>
           <option value="calc">Calculated (equation)</option>
+          <option value="lookup">Price list (filled in by name)</option>
         </select>
       </label>
+      <div id="lookupWrap" hidden>
+        <label class="field">Prices, one per line: name = price
+          <textarea id="colLookup" rows="6" autocomplete="off" spellcheck="false" placeholder="ባለ 10 = 10&#10;ብስኩት = 45"></textarea>
+        </label>
+        <button id="lookupFromTable" type="button" class="btn small">+ Add the names in the table</button>
+        <p id="lookupHelp" class="muted small note"></p>
+        <p id="lookupPreview" class="small eq-preview"></p>
+      </div>
       <div id="eqWrap" hidden>
         <label class="field">Equation <textarea id="colEquation" rows="2" autocomplete="off" spellcheck="false" placeholder="[Qty] × [Price]"></textarea></label>
         <div class="eq-keys">
@@ -201,6 +215,26 @@
       <label class="field">API key <input id="keyInput" type="password" autocomplete="off" spellcheck="false"></label>
       <div class="row space">
         <button id="keyForget" value="forget" class="btn ghost danger" formnovalidate>Remove key</button>
+        <div class="row">
+          <button value="cancel" class="btn ghost" formnovalidate>Cancel</button>
+          <button value="ok" class="btn primary">Save</button>
+        </div>
+      </div>
+    </form>
+  </dialog>
+
+  <dialog id="namesDialog">
+    <form method="dialog">
+      <h3>Remembered names</h3>
+      <p class="small">The item names on your form, one per line, in the order they're printed. Claude and Gemini are told these names, so they read them correctly, and names in the table that aren't on the list are marked 🟨 to check.</p>
+      <p class="muted small">Keep the list correct: the AI copies these spellings, even over the photo. If a name on your form changes, change it here too.</p>
+      <textarea id="namesList" rows="10" autocomplete="off" spellcheck="false" placeholder="ባለ 10&#10;ባለ 25&#10;ብስኩት 45"></textarea>
+      <div class="row wrap">
+        <button id="namesFromTable" type="button" class="btn small">+ Add the names in the table</button>
+        <span id="namesCount" class="muted small"></span>
+      </div>
+      <div class="row space">
+        <span></span>
         <div class="row">
           <button value="cancel" class="btn ghost" formnovalidate>Cancel</button>
           <button value="ok" class="btn primary">Save</button>
